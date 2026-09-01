@@ -8,9 +8,9 @@ As someone who just wants to run no more than 5 VM's I like the simplicity of ju
 
 ## What is a Pademelon?
 
-A Pademelon is similar to a Kangaroo or Wallaby. It is a marsupial, native to Australia. They are generally small in size, similar to a Quokka, though Pademelons are a group of macopods, where as a Quokka is a sole member of it's genus. 
+A Pademelon is similar to a Kangaroo or Wallaby. It is a marsupial, native to Australia. They are generally small in size, similar to a Quokka, though Pademelons are a group of macropods, where as a Quokka is a sole member of it's genus. 
 
-## Why the name Pademlon?
+## Why the name Pademelon?
 
 Marsupials carry their young in a pouch, which makes me think of a hypervisor with a VM running inside. 
 
