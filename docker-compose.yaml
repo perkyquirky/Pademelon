@@ -17,5 +17,6 @@ services:
     # command:
     #   - "-listen=:8088"
     #   - "-interval=30s"
-    #   - "-agent-timeout=5"
+    #   - "-agent-timeout=5s"
+    #   - "-stats-period=10s"
     #   - "-log-level=info"

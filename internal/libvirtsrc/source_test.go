@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/digitalocean/go-libvirt"
+
+	"pademelon/internal/clocks"
 )
 
 func stat(tag int32, val uint64) libvirt.DomainMemoryStat {
@@ -58,7 +60,7 @@ func TestBalloonMemory(t *testing.T) {
 			stats: []libvirt.DomainMemoryStat{
 				stat(memStatAvailable, 1438720),
 				stat(memStatUsable, 774144),
-				stat(memStatLastUpdate, uint64(now.Add(-balloonStaleAfter).Unix())),
+				stat(memStatLastUpdate, uint64(now.Add(-clocks.BalloonStaleAfter).Unix())),
 			},
 			wantUsed:  664576,
 			wantTotal: 1438720,
@@ -146,5 +148,34 @@ func TestLogMemoryStaleWarnsOnce(t *testing.T) {
 	s.logMemoryStale("4_foundry", false)
 	if buf.Len() != 0 {
 		t.Fatalf("repeated non-stale observations should be silent, log was: %q", buf.String())
+	}
+}
+
+func TestNewWarnsWhenStatsPeriodNearStaleness(t *testing.T) {
+	// A collection period of 3m means readings are 3–6m old at poll time,
+	// while anything older than clocks.BalloonStaleAfter (5m) is rejected —
+	// so most readings would never survive. That deserves one warning.
+	tests := []struct {
+		name        string
+		statsPeriod time.Duration
+		wantWarn    bool
+	}{
+		{name: "default period stays quiet", statsPeriod: clocks.DefaultStatsPeriod},
+		{name: "disabled stays quiet", statsPeriod: 0},
+		{name: "period near threshold warns", statsPeriod: 3 * time.Minute, wantWarn: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			New(Config{
+				Log:         slog.New(slog.NewTextHandler(&buf, nil)),
+				StatsPeriod: tt.statsPeriod,
+			})
+			got := strings.Contains(buf.String(), "staleness threshold")
+			if got != tt.wantWarn {
+				t.Fatalf("stats period %s: warned = %v, want %v (log: %q)",
+					tt.statsPeriod, got, tt.wantWarn, buf.String())
+			}
+		})
 	}
 }

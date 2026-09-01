@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"pademelon/internal/clocks"
 	"pademelon/internal/libvirtsrc"
 	"pademelon/internal/model"
 	"pademelon/internal/web"
@@ -30,9 +31,9 @@ func main() {
 	var (
 		listen       = flag.String("listen", ":8088", "address to serve the dashboard on")
 		socket       = flag.String("socket", "/run/truenas_libvirt/libvirt-sock", "path to the libvirt unix socket")
-		interval     = flag.Duration("interval", 30*time.Second, "how often to poll libvirt")
-		agentTimeout = flag.Int("agent-timeout", 5, "seconds to allow a guest agent command")
-		statsPeriod  = flag.Int("stats-period", 10, "seconds between guest balloon stat refreshes; 0 shows allocated RAM only")
+		interval     = flag.Duration("interval", clocks.DefaultPollInterval, "how often to poll libvirt")
+		agentTimeout = flag.Duration("agent-timeout", clocks.DefaultAgentTimeout, "how long to allow one guest agent command, e.g. 5s")
+		statsPeriod  = flag.Duration("stats-period", clocks.DefaultStatsPeriod, "how often QEMU refreshes guest balloon stats; 0s shows allocated RAM only")
 		concurrency  = flag.Int("concurrency", 8, "how many VMs to interrogate at once")
 		logLevel     = flag.String("log-level", "info", "debug, info, warn or error")
 		logFormat    = flag.String("log-format", "text", "text or json")
@@ -40,6 +41,19 @@ func main() {
 		healthcheck  = flag.Bool("healthcheck", false, "probe a running instance and exit 0 or 1")
 	)
 	flag.Parse()
+
+	// libvirt's agent and balloon-stats APIs take whole seconds. A sub-second
+	// value would silently truncate (500ms -> 0), so reject it instead of
+	// rounding behind the user's back. 0 is special for stats-period only:
+	// it disables QEMU's collection timer entirely.
+	if *agentTimeout < time.Second {
+		fmt.Fprintf(os.Stderr, "pademelon: -agent-timeout must be at least 1s, got %s\n", *agentTimeout)
+		os.Exit(2)
+	}
+	if *statsPeriod != 0 && *statsPeriod < time.Second {
+		fmt.Fprintf(os.Stderr, "pademelon: -stats-period must be 0s (disabled) or at least 1s, got %s\n", *statsPeriod)
+		os.Exit(2)
+	}
 
 	if *showVersion {
 		fmt.Println("pademelon", version)
@@ -64,16 +78,16 @@ func main() {
 		"listen", *listen,
 		"socket", *socket,
 		"interval", *interval,
-		"agent_timeout_s", *agentTimeout,
-		"stats_period_s", *statsPeriod,
+		"agent_timeout_s", int64(*agentTimeout/time.Second),
+		"stats_period_s", int64(*statsPeriod/time.Second),
 	)
 
 	cache := model.NewCache()
 
 	src := libvirtsrc.New(libvirtsrc.Config{
 		Socket:       *socket,
-		AgentTimeout: int32(*agentTimeout),
-		StatsPeriod:  int32(*statsPeriod),
+		AgentTimeout: *agentTimeout,
+		StatsPeriod:  *statsPeriod,
 		Concurrency:  *concurrency,
 		Log:          log,
 	})
@@ -87,7 +101,7 @@ func main() {
 	srv := &http.Server{
 		Addr:              *listen,
 		Handler:           web.New(cache, log).Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
+		ReadHeaderTimeout: clocks.HeaderReadTimeout,
 	}
 
 	go func() {
@@ -100,7 +114,7 @@ func main() {
 	<-ctx.Done()
 	log.Info("shutting down")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), clocks.ShutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error("shutdown", "err", err)
@@ -151,7 +165,7 @@ func probe(listen string) int {
 		host = "127.0.0.1"
 	}
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := &http.Client{Timeout: clocks.ProbeTimeout}
 	resp, err := client.Get("http://" + net.JoinHostPort(host, port) + "/healthz")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pademelon:", err)

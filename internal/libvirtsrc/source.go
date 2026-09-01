@@ -20,6 +20,7 @@ import (
 	"github.com/digitalocean/go-libvirt/socket/dialers"
 
 	"pademelon/internal/agent"
+	"pademelon/internal/clocks"
 	"pademelon/internal/model"
 )
 
@@ -33,12 +34,6 @@ const (
 	memStatLastUpdate int32 = 9 // host unix time the stats were collected
 )
 
-// balloonStaleAfter is how old the balloon stats may be before we stop
-// trusting them. A live guest refreshes them on every query, so anything
-// much older means the virtio_balloon driver in the guest has gone quiet
-// and QEMU is handing back a fossil.
-const balloonStaleAfter = 5 * time.Minute
-
 // guestAgentChannel is the virtio-serial channel TrueNAS adds to every VM.
 const guestAgentChannel = "org.qemu.guest_agent.0"
 
@@ -51,17 +46,17 @@ type Config struct {
 	// /run/truenas_libvirt/libvirt-sock, not /var/run/libvirt/libvirt-sock.
 	Socket string
 
-	// AgentTimeout is how many seconds to give a guest agent command.
-	// libvirt treats -2 as block forever and -1 as its own default; we always
-	// want a real number here so one wedged guest can't stall a poll.
-	AgentTimeout int32
+	// AgentTimeout is how long to give a guest agent command. libvirt's API
+	// takes whole seconds; main rejects sub-second values at startup, so
+	// one wedged guest can't stall a poll.
+	AgentTimeout time.Duration
 
 	// StatsPeriod is how often QEMU re-collects balloon stats from the
-	// guest, in seconds. QEMU only collects while its poll timer runs, and
-	// TrueNAS's domain XML never sets one, so without it every reading is a
+	// guest. QEMU only collects while its poll timer runs, and TrueNAS's
+	// domain XML never sets one, so without it every reading is a
 	// single snapshot taken at guest boot. 0 disables and keeps that
 	// boot-snapshot behaviour (with stale readings rejected).
-	StatsPeriod int32
+	StatsPeriod time.Duration
 
 	// Concurrency caps how many VMs we interrogate at once.
 	Concurrency int
@@ -104,13 +99,24 @@ type cpuSample struct {
 // reconnects if the socket goes away.
 func New(cfg Config) *Source {
 	if cfg.AgentTimeout <= 0 {
-		cfg.AgentTimeout = 5
+		cfg.AgentTimeout = clocks.DefaultAgentTimeout
 	}
 	if cfg.Concurrency <= 0 {
 		cfg.Concurrency = 8
 	}
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
+	}
+	// A balloon reading is roughly one to two collection periods old by the
+	// time we look at it — QEMU collects on its own timer, we read whenever
+	// the poll fires. Once 2× the period reaches the staleness threshold,
+	// most readings get rejected as fossils and the memory column shows
+	// "allocated". That's a config mistake worth complaining about once.
+	if cfg.StatsPeriod > 0 && 2*cfg.StatsPeriod >= clocks.BalloonStaleAfter {
+		cfg.Log.Warn("stats period close to staleness threshold, most memory readings will be rejected",
+			"stats_period", cfg.StatsPeriod,
+			"stale_after", clocks.BalloonStaleAfter,
+		)
 	}
 	return &Source{
 		cfg:            cfg,
@@ -339,10 +345,17 @@ func (s *Source) fillFromAgent(conn *libvirt.Libvirt, d libvirt.Domain, vm *mode
 	}
 }
 
+// secondsInt32 converts a duration to the whole seconds libvirt's agent and
+// stats APIs take. main rejects sub-second values at startup, so this only
+// ever sees whole seconds.
+func secondsInt32(d time.Duration) int32 {
+	return int32(d / time.Second)
+}
+
 // agentCaller adapts libvirt's agent RPC to the agent package's Caller.
 func (s *Source) agentCaller(conn *libvirt.Libvirt, d libvirt.Domain) agent.Caller {
 	return func(cmd string) (string, error) {
-		res, err := conn.QEMUDomainAgentCommand(d, cmd, s.cfg.AgentTimeout, 0)
+		res, err := conn.QEMUDomainAgentCommand(d, cmd, secondsInt32(s.cfg.AgentTimeout), 0)
 		if err != nil {
 			return "", err
 		}
@@ -399,7 +412,7 @@ func balloonMemory(stats []libvirt.DomainMemoryStat, now time.Time) (used, total
 		return 0, 0, false, false
 	}
 
-	if haveLastUpdate && lastUpdate > 0 && now.Sub(time.Unix(lastUpdate, 0)) > balloonStaleAfter {
+	if haveLastUpdate && lastUpdate > 0 && now.Sub(time.Unix(lastUpdate, 0)) > clocks.BalloonStaleAfter {
 		return 0, 0, false, true
 	}
 
@@ -478,7 +491,7 @@ func (s *Source) enableStatsPeriod(conn *libvirt.Libvirt, d libvirt.Domain) {
 		return
 	}
 
-	if err := conn.DomainSetMemoryStatsPeriod(d, s.cfg.StatsPeriod, 0); err != nil {
+	if err := conn.DomainSetMemoryStatsPeriod(d, secondsInt32(s.cfg.StatsPeriod), 0); err != nil {
 		// One transient failure shouldn't disable the feature for the
 		// process's lifetime; try again on the next poll.
 		s.mu.Lock()
@@ -487,7 +500,7 @@ func (s *Source) enableStatsPeriod(conn *libvirt.Libvirt, d libvirt.Domain) {
 		s.log.Debug("stats period failed", "domain", d.Name, "err", err)
 		return
 	}
-	s.log.Debug("balloon stats polling enabled", "domain", d.Name, "period_s", s.cfg.StatsPeriod)
+	s.log.Debug("balloon stats polling enabled", "domain", d.Name, "stats_period", s.cfg.StatsPeriod)
 }
 
 // forgetStatsPeriod drops the per-boot marker. A VM restart makes a fresh
