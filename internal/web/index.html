@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pademelon</title>
+<style>
+:root {
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --border: #dfe3e8;
+  --text: #1c2024;
+  --muted: #6b7280;
+  --accent: #2563eb;
+  --ok: #16a34a;
+  --warn: #d97706;
+  --bad: #dc2626;
+  --off: #9ca3af;
+  --track: #e5e7eb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --panel: #1c1f24;
+    --border: #2c3038;
+    --text: #e6e8eb;
+    --muted: #9199a5;
+    --accent: #60a5fa;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --bad: #f87171;
+    --off: #6b7280;
+    --track: #2c3038;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+.status { color: var(--muted); font-size: 13px; }
+.status.bad { color: var(--bad); }
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow-x: auto;
+}
+table { width: 100%; border-collapse: collapse; min-width: 900px; }
+th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+tr:last-child td { border-bottom: none; }
+tr.stopped td { opacity: 0.55; }
+
+.name { font-weight: 600; }
+.sub { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.badge.running { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.badge.stopped { background: color-mix(in srgb, var(--off) 20%, transparent); color: var(--off); }
+.badge.other   { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.badge.err     { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
+
+.meter { min-width: 120px; }
+.bar {
+  height: 6px;
+  background: var(--track);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+.bar > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.bar > span.warn { background: var(--warn); }
+.bar > span.bad  { background: var(--bad); }
+.val { font-variant-numeric: tabular-nums; font-size: 12.5px; }
+
+.fs { margin-bottom: 8px; }
+.fs:last-child { margin-bottom: 0; }
+.dash { color: var(--muted); }
+.empty { padding: 40px; text-align: center; color: var(--muted); }
+footer { margin-top: 14px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Pademelon</h1>
+  <span class="status" id="status">loading…</span>
+</header>
+
+<div class="panel">
+  <table>
+    <thead>
+      <tr>
+        <th>VM</th>
+        <th>State</th>
+        <th>CPU</th>
+        <th>Memory</th>
+        <th>Addresses</th>
+        <th>OS</th>
+        <th>Storage</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="empty" id="empty" hidden>No VMs found.</div>
+</div>
+
+<footer id="foot"></footer>
+
+<script>
+const REFRESH_MS = 1500;
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => (
+    {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]
+  ));
+}
+
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const u = ["B","KiB","MiB","GiB","TiB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(n < 10 && i > 0 ? 1 : 0) + " " + u[i];
+}
+
+function fmtKiB(kib) { return fmtBytes(kib * 1024); }
+
+function level(pct) { return pct >= 90 ? "bad" : pct >= 75 ? "warn" : ""; }
+
+function meter(pct, label) {
+  const p = Math.max(0, Math.min(100, pct));
+  return `<div class="meter">
+    <div class="val">${esc(label)}</div>
+    <div class="bar"><span class="${level(p)}" style="width:${p.toFixed(1)}%"></span></div>
+  </div>`;
+}
+
+function stateBadge(vm) {
+  const cls = vm.running ? "running" : vm.state === "stopped" ? "stopped"
+            : vm.state === "crashed" ? "err" : "other";
+  return `<span class="badge ${cls}">${esc(vm.state)}</span>`;
+}
+
+function agentNote(vm) {
+  if (vm.running && vm.agent === "disconnected")
+    return `<div class="sub" title="Install qemu-guest-agent in this VM">agent not installed</div>`;
+  if (vm.running && vm.agent === "error")
+    return `<div class="sub" title="${esc(vm.agentError || "")}">agent not answering</div>`;
+  if (vm.running && vm.agent === "absent")
+    return `<div class="sub">no agent channel</div>`;
+  return "";
+}
+
+function addresses(vm) {
+  const real = (vm.interfaces || []).filter(i => !i.virtual);
+  const out = [];
+  for (const i of real) {
+    for (const ip of (i.ipv4 || [])) out.push(`${ip} <span class="sub">${esc(i.name)}</span>`);
+  }
+  if (!out.length) return `<span class="dash">—</span>`;
+  return `<div class="mono">${out.join("<br>")}</div>`;
+}
+
+function storage(vm) {
+  const fs = vm.filesystems || [];
+  if (!fs.length) return `<span class="dash">—</span>`;
+  return fs.map(f => {
+    const pct = f.totalBytes ? (f.usedBytes / f.totalBytes * 100) : 0;
+    const label = `${esc(f.mountpoint)} · ${fmtBytes(f.usedBytes)} / ${fmtBytes(f.totalBytes)}`;
+    return `<div class="fs">${meter(pct, label)}</div>`;
+  }).join("");
+}
+
+function row(vm) {
+  const cpu = vm.running
+    ? (vm.cpuKnown ? meter(vm.cpuPercent, vm.cpuPercent.toFixed(1) + "%")
+                   : `<span class="dash">measuring…</span>`)
+    : `<span class="dash">—</span>`;
+
+  const mem = vm.running
+    ? (vm.memKnown
+        ? meter(vm.memUsedKiB / vm.memTotalKiB * 100,
+                `${fmtKiB(vm.memUsedKiB)} / ${fmtKiB(vm.memTotalKiB)}`)
+        : `<div class="val sub">${fmtKiB(vm.memTotalKiB)} allocated</div>`)
+    : `<div class="val sub">${fmtKiB(vm.memTotalKiB)} allocated</div>`;
+
+  const os = vm.os
+    ? `<div>${esc(vm.os)}</div>` + (vm.kernel ? `<div class="sub mono">${esc(vm.kernel)}</div>` : "")
+    : `<span class="dash">—</span>`;
+
+  return `<tr class="${vm.running ? "" : "stopped"}">
+    <td>
+      <div class="name">${esc(vm.hostname || vm.name)}</div>
+      <div class="sub">${esc(vm.domain)} · ${vm.vcpus} vCPU</div>
+      ${agentNote(vm)}
+    </td>
+    <td>${stateBadge(vm)}</td>
+    <td>${cpu}</td>
+    <td>${mem}</td>
+    <td>${addresses(vm)}</td>
+    <td>${os}</td>
+    <td>${storage(vm)}</td>
+  </tr>`;
+}
+
+async function tick() {
+  const statusEl = document.getElementById("status");
+  try {
+    const res = await fetch("/api/vms", { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const snap = await res.json();
+
+    const vms = (snap.vms || []).slice().sort((a, b) => {
+      if (a.running !== b.running) return a.running ? -1 : 1;
+      return (a.name || "").localeCompare(b.name || "");
+    });
+
+    document.getElementById("rows").innerHTML = vms.map(row).join("");
+    document.getElementById("empty").hidden = vms.length > 0;
+
+    if (snap.connected) {
+      statusEl.className = "status";
+      statusEl.textContent = `${vms.length} VMs · polled ${new Date(snap.polled).toLocaleTimeString()} · ${snap.pollMs} ms`;
+    } else {
+      statusEl.className = "status bad";
+      statusEl.textContent = `libvirt disconnected — showing last known data. ${snap.error || ""}`;
+    }
+    document.getElementById("foot").textContent =
+      "Refreshes every " + (REFRESH_MS / 1000) + "s.";
+  } catch (e) {
+    statusEl.className = "status bad";
+    statusEl.textContent = "can't reach Pademelon: " + e.message;
+  }
+}
+
+tick();
+setInterval(tick, REFRESH_MS);
+</script>
+</body>
+</html>

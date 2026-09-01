@@ -1,0 +1,21 @@
+# pademelon — read-only VM dashboard for TrueNAS Scale.
+
+services:
+  pademelon:
+    image: ghcr.io/smuwuthie/pademelon:latest
+    container_name: pademelon
+    restart: unless-stopped
+
+    ports:
+      - "8088:8088"
+
+    volumes:
+      - /run/truenas_libvirt:/run/truenas_libvirt
+    user: "0:0"
+
+    # Everything below is optional; these are the defaults.
+    # command:
+    #   - "-listen=:8088"
+    #   - "-interval=30s"
+    #   - "-agent-timeout=5"
+    #   - "-log-level=info"
