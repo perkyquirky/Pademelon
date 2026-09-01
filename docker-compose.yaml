@@ -2,7 +2,7 @@
 
 services:
   pademelon:
-    image: ghcr.io/smuwuthie/pademelon:latest
+    image: ghcr.io/perkyquirky/pademelon:latest
     container_name: pademelon
     restart: unless-stopped
 
