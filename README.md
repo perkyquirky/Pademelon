@@ -36,15 +36,26 @@ Windows and Linux (tested Windows Server 2022 & Ubuntu Server 24.04.4 LTS)
   - Stop / restart
   - Any kind of writing to the VM
 
+## How to use?
+
+Pademelon requires that you have the QEMU Guest Agent installed in your VM's. 
+
+You do not have to change any settings in Truenas to enable the guest agent functionality. Just install the agent in your VM's and you are good to go.
+
+The [Proxmox documentation](https://pve.proxmox.com/wiki/Qemu-guest-agent) has the easiest to understand guide on how to install the guest agent.
+
+
 ## Docker Compose
 
 There is a compose file in the root directory of this repository for you to copy.
 
-You can adjust settings in the compose file with the following:
+[Compose File](https://github.com/perkyquirky/Pademelon/blob/main/docker-compose.yaml)
+
+The following is for explaining the compose options:
 
 ``` yaml
 
-# Illustrative example — copy docker-compose.yaml from the repo as your starting point.
+# Illustrative example only! — copy docker-compose.yaml from the repo as your starting point.
 
 services:
   pademelon:
