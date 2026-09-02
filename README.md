@@ -25,12 +25,15 @@ Also they are adorable.
 - CPU usage
 - Memory usage
 - IP address & interface ID
-- Host OS & kernel (linux)
+- Host OS - kernel (Linux) / OS build (Windows)
 - Drive partitions & usage
+
+Linux and Windows guests both work. 
+
+One Windows caveat: memory usage shows allocated RAM only, because the Windows balloon driver doesn't report guest memory. 
 
 ## Currently unsupported:
 
-- Windows VM's
 - Any write operations e.g:
   - Stop / restart
   - Any kind of writing to the VM

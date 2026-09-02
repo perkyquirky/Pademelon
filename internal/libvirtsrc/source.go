@@ -529,7 +529,7 @@ func (s *Source) logAgentTransition(domain string, now model.AgentState) {
 		s.log.Info("guest agent responding", "domain", domain)
 	case now == model.AgentDisconnected:
 		s.log.Warn("guest agent not running in guest", "domain", domain,
-			"hint", "apt install qemu-guest-agent")
+			"hint", "install the QEMU guest agent (qemu-guest-agent on Linux, virtio-win guest tools on Windows)")
 	case now == model.AgentError:
 		s.log.Warn("guest agent channel open but not answering", "domain", domain)
 	}

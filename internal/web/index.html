@@ -178,7 +178,7 @@ function stateBadge(vm) {
 
 function agentNote(vm) {
   if (vm.running && vm.agent === "disconnected")
-    return `<div class="sub" title="Install qemu-guest-agent in this VM">agent not installed</div>`;
+    return `<div class="sub" title="Install the QEMU guest agent in this VM (qemu-guest-agent on Linux, virtio-win guest tools on Windows)">agent not installed</div>`;
   if (vm.running && vm.agent === "error")
     return `<div class="sub" title="${esc(vm.agentError || "")}">agent not answering</div>`;
   if (vm.running && vm.agent === "absent")
