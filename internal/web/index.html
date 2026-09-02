@@ -1023,7 +1023,10 @@ function renderVMs(vms) {
       store.set(vm.domain, entry);
       host.appendChild(entry.el);
     }
-    if (frozen.has(entry.el)) continue;
+    if (frozen.has(entry.el)) {
+      ordered.push(entry.el);
+      continue;
+    }
     const next = sig(vm);
     if (entry.sig !== next) {
       const fresh = build(vm);
@@ -1045,6 +1048,10 @@ function renderVMs(vms) {
   }
   let prev = null;
   for (const el of ordered) {
+    if (frozen.has(el)) {
+      prev = el;
+      continue;
+    }
     if (el.previousElementSibling !== prev)
       host.insertBefore(el, prev ? prev.nextSibling : host.firstChild);
     prev = el;
