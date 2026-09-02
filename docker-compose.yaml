@@ -22,4 +22,4 @@ services:
     #   - "-log-level=info"
     #   - "-log-format=text"
     #   - "-concurrency=8"
-    #   - "-socket=/var/run/libvirt"    
+    #   - "-socket=/run/truenas_libvirt/libvirt-sock"

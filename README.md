@@ -78,7 +78,7 @@ services:
     # This is required to get fresh memory statistics, without it stale data is returned. Do not adjust unless necessary
       - "-stats-period=10s"
     
-    # Sets the level of logging: `info`, `debug`, `info`, `warn`, `error` 
+    # Sets the level of logging: `debug`, `info`, `warn`, `error` 
       - "-log-level=info"
 
     # Sets the logging output format:  `text`, `text`, `json`
