@@ -43,9 +43,7 @@ You can adjust settings in the compose file with the following:
 
 ``` yaml
 
-# DO NOT USE THIS AS A COMPOSE FILE.
-# IT IS FOR DEMONSTRATION AND HAS CONFLICTING INFORMATION.
-# USE THE COMPOSE FILE IN THE REPOSITORY.
+# Illustrative example — copy docker-compose.yaml from the repo as your starting point.
 
 services:
   pademelon:
@@ -71,8 +69,8 @@ services:
     # CPU usage, memory usage, network info, drive data, agent status, etc. are all controlled with this timer. 
       - "-interval=30s"
 
-    # As a single timer is used to poll for data from the VM, if one stat hangs, for example hard drive data is not returned, 
-    # the time out is set to 5 seconds to ensure the other data is successfully returned.
+    # Caps each guest agent command at 5 seconds, so if one command hangs
+    # the poll moves on instead of stalling on that VM.
       - "-agent-timeout=5s"
 
     # This is required to get fresh memory statistics, without it stale data is returned. Do not adjust unless necessary
@@ -81,19 +79,17 @@ services:
     # Sets the level of logging: `debug`, `info`, `warn`, `error` 
       - "-log-level=info"
 
-    # Sets the logging output format:  `text`, `text`, `json`
+    # Sets the logging output format: `text` or `json`
       - "-log-format=text"
 
-    # Sets the path for the libvirt socket. This wont need changing unless truenas change the location of the socket.
-    # If this changes you need to also need to change the volumes path to the socket too.
-      - "-socket=/run/truenas_libvirt"
-    # For example if the path needs changing you need to change both the socket and mount:
-      volumes:
-        - /var/run/libvirt:/var/run/libvirt
-
-        - "-socket=/var/run/libvirt"
-    # One convention note: older libvirt setups often use /var/run/libvirt/libvirt-sock but on TrueNAS
-    # Truenas uses a symlink to /run/... — mount the real /run/... path, since /var/run may not resolve inside this scratch-based container.
-
-
+    # Sets the path for the libvirt socket. This won't need changing unless TrueNAS
+    # changes the location of the socket. If the socket ever moves, change the host
+    # side (left) of the mount to the new directory — the container side can stay
+    # /run/truenas_libvirt:
+    #   volumes:
+    #     - /new/host/dir:/run/truenas_libvirt
+    # Only if the socket file name changes too do you need to point -socket at the
+    # new file. Always mount the directory, not the socket file: libvirtd deletes
+    # and recreates the socket when it restarts, and a mounted file goes dead.
+      - "-socket=/run/truenas_libvirt/libvirt-sock"
 ```
