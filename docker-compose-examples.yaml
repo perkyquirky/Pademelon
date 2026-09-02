@@ -15,6 +15,10 @@ services:
     user: "0:0"
 
     command:
+    # Select default theme
+    # Valid options: sweetpea, classic, charm, catppuccin-latte, catppuccin-frappe, catppuccin-macchiato, catppuccin-mocha, dracula, noctis
+      - "-theme=dracula"
+
     # -listen changes the internal listen port, dont change unless you know why you would
       - "-listen=:8088"
 

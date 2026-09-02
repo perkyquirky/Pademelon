@@ -356,7 +356,7 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
-html { scrollbar-gutter: stable; }
+html { scrollbar-gutter: stable; min-height: 100%; }
 body {
   margin: 0;
   padding: 24px;
@@ -905,9 +905,156 @@ function cardVM(vm) {
 }
 
 const state = { view: "cards" };
+const stores = { table: new Map(), cards: new Map() };
+
+function sig(vm) {
+  const ips = [];
+  for (const i of (vm.interfaces || [])) {
+    if (i.virtual) continue;
+    for (const ip of (i.ipv4 || [])) ips.push(ip);
+  }
+  return JSON.stringify([
+    vm.hostname || vm.name, vm.domain, vm.vcpus, vm.running,
+    vm.agent, vm.agentError || "", vm.cpuKnown, vm.memKnown,
+    ips, vm.os || "", vm.kernel || "",
+    (vm.filesystems || []).map(f => f.mountpoint)
+  ]);
+}
+
+function fromHTML(html) {
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html.trim();
+  return tpl.content.firstElementChild;
+}
+
+function setBadge(el, vm) {
+  el.className = "badge " + (vm.running ? "running" : vm.state === "stopped" ? "stopped"
+    : vm.state === "crashed" ? "err" : "other");
+  el.textContent = vm.state;
+}
+
+function setMeter(meterEl, pct, label) {
+  const p = Math.max(0, Math.min(100, pct));
+  meterEl.querySelector(".val").textContent = label;
+  const span = meterEl.querySelector(".bar > span");
+  span.className = level(p);
+  span.style.width = p.toFixed(1) + "%";
+}
+
+function updateValues(refs, vm) {
+  setBadge(refs.badge, vm);
+  if (vm.running && vm.cpuKnown)
+    setMeter(refs.cpuMeter, vm.cpuPercent, vm.cpuPercent.toFixed(1) + "%");
+  if (vm.running && vm.memKnown)
+    setMeter(refs.memMeter, vm.memUsedKiB / vm.memTotalKiB * 100,
+      fmtKiB(vm.memUsedKiB) + " / " + fmtKiB(vm.memTotalKiB));
+  else
+    refs.memVal.textContent = fmtKiB(vm.memTotalKiB) + " allocated";
+  (vm.filesystems || []).forEach((f, i) => {
+    if (!refs.fsMeters[i]) return;
+    setMeter(refs.fsMeters[i],
+      f.totalBytes ? f.usedBytes / f.totalBytes * 100 : 0,
+      f.mountpoint + " · " + fmtBytes(f.usedBytes) + " / " + fmtBytes(f.totalBytes));
+  });
+}
+
+function buildCard(vm) {
+  const li = fromHTML(cardVM(vm));
+  const card = li.firstElementChild;
+  const dds = card.querySelectorAll(".facts > div > dd");
+  return {
+    el: li, sig: sig(vm),
+    refs: {
+      card: card,
+      badge: card.querySelector(".badge"),
+      cpuMeter: dds[0].querySelector(".meter"),
+      memMeter: dds[1].querySelector(".meter"),
+      memVal: dds[1].querySelector(".val.sub"),
+      fsMeters: [...card.querySelectorAll(".facts .fs .meter")]
+    }
+  };
+}
+
+function buildRow(vm) {
+  const tr = fromHTML(row(vm));
+  return {
+    el: tr, sig: sig(vm),
+    refs: {
+      badge: tr.children[1].firstElementChild,
+      cpuMeter: tr.children[2].querySelector(".meter"),
+      memMeter: tr.children[3].querySelector(".meter"),
+      memVal: tr.children[3].querySelector(".val.sub"),
+      fsMeters: [...tr.children[6].querySelectorAll(".fs .meter")]
+    }
+  };
+}
+
+function frozenSet(store) {
+  const sel = document.getSelection();
+  const out = new Set();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return out;
+  const range = sel.getRangeAt(0);
+  for (const [, entry] of store) {
+    if (range.intersectsNode(entry.el)) out.add(entry.el);
+  }
+  return out;
+}
+
+function selectionTouches(el) {
+  const sel = document.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+  return sel.getRangeAt(0).intersectsNode(el);
+}
+
+function renderVMs(vms) {
+  const isTable = state.view === "table";
+  const host = document.getElementById(isTable ? "rows" : "grid");
+  const store = stores[state.view];
+  const frozen = frozenSet(store);
+  const build = isTable ? buildRow : buildCard;
+
+  const seen = new Set();
+  const ordered = [];
+  for (const vm of vms) {
+    seen.add(vm.domain);
+    let entry = store.get(vm.domain);
+    if (!entry) {
+      entry = build(vm);
+      store.set(vm.domain, entry);
+      host.appendChild(entry.el);
+    }
+    if (frozen.has(entry.el)) continue;
+    const next = sig(vm);
+    if (entry.sig !== next) {
+      const fresh = build(vm);
+      entry.el.replaceWith(fresh.el);
+      store.set(vm.domain, fresh);
+      entry = fresh;
+    } else {
+      updateValues(entry.refs, vm);
+      if (isTable) entry.el.classList.toggle("stopped", !vm.running);
+      else entry.refs.card.classList.toggle("stopped", !vm.running);
+    }
+    ordered.push(entry.el);
+  }
+  for (const [key, entry] of [...store]) {
+    if (!seen.has(key) && !frozen.has(entry.el)) {
+      entry.el.remove();
+      store.delete(key);
+    }
+  }
+  let prev = null;
+  for (const el of ordered) {
+    if (el.previousElementSibling !== prev)
+      host.insertBefore(el, prev ? prev.nextSibling : host.firstChild);
+    prev = el;
+  }
+  document.getElementById("empty").hidden = store.size > 0;
+}
 
 async function tick() {
   const statusEl = document.getElementById("status");
+  const footEl = document.getElementById("foot");
   try {
     const res = await fetch("/api/vms", { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
@@ -920,22 +1067,21 @@ async function tick() {
 
     document.getElementById("table-view").hidden = state.view !== "table";
     document.getElementById("grid").hidden = state.view !== "cards";
-    if (state.view === "table") {
-      document.getElementById("rows").innerHTML = vms.map(row).join("");
-    } else {
-      document.getElementById("grid").innerHTML = vms.map(cardVM).join("");
-    }
-    document.getElementById("empty").hidden = vms.length > 0;
+    renderVMs(vms);
 
-    if (snap.connected) {
-      statusEl.className = "status";
-      statusEl.textContent = `${vms.length} VMs · polled ${new Date(snap.polled).toLocaleTimeString()} · ${snap.pollMs} ms`;
-    } else {
-      statusEl.className = "status bad";
-      statusEl.textContent = `libvirt disconnected — showing last known data. ${snap.error || ""}`;
+    if (!selectionTouches(statusEl)) {
+      if (snap.connected) {
+        statusEl.className = "status";
+        statusEl.textContent = `${vms.length} VMs · polled ${new Date(snap.polled).toLocaleTimeString()} · ${snap.pollMs} ms`;
+      } else {
+        statusEl.className = "status bad";
+        statusEl.textContent = `libvirt disconnected — showing last known data. ${snap.error || ""}`;
+      }
     }
-    document.getElementById("foot").textContent =
-      "refreshes every " + (REFRESH_MS / 1000) + "s · read-only · made with ♥ (˶ˆᗜˆ˵)";
+    if (!selectionTouches(footEl)) {
+      footEl.textContent =
+        "refreshes every " + (REFRESH_MS / 1000) + "s · read-only · made with ♥ (˶ˆᗜˆ˵)";
+    }
   } catch (e) {
     statusEl.className = "status bad";
     statusEl.textContent = "can't reach Pademelon: " + e.message;

@@ -15,6 +15,7 @@ services:
 
     # Everything below is optional; these are the defaults.
     # command:
+    #   - "-theme=dracula"
     #   - "-listen=:8088"
     #   - "-interval=30s"
     #   - "-agent-timeout=5s"
