@@ -20,3 +20,6 @@ services:
     #   - "-agent-timeout=5s"
     #   - "-stats-period=10s"
     #   - "-log-level=info"
+    #   - "-log-format=text"
+    #   - "-concurrency=8"
+    #   - "-socket=/var/run/libvirt"    

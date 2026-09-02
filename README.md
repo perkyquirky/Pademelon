@@ -42,6 +42,11 @@ There is a compose file in the root directory of this repository for you to copy
 You can adjust settings in the compose file with the following:
 
 ``` yaml
+
+# DO NOT USE THIS AS A COMPOSE FILE.
+# IT IS FOR DEMONSTRATION AND HAS CONFLICTING INFORMATION.
+# USE THE COMPOSE FILE IN THE REPOSITORY.
+
 services:
   pademelon:
     image: ghcr.io/perkyquirky/pademelon:latest
@@ -78,4 +83,17 @@ services:
 
     # Sets the logging output format:  `text`, `text`, `json`
       - "-log-format=text"
+
+    # Sets the path for the libvirt socket. This wont need changing unless truenas change the location of the socket.
+    # If this changes you need to also need to change the volumes path to the socket too.
+      - "-socket=/run/truenas_libvirt"
+    # For example if the path needs changing you need to change both the socket and mount:
+      volumes:
+        - /var/run/libvirt:/var/run/libvirt
+
+        - "-socket=/var/run/libvirt"
+    # One convention note: older libvirt setups often use /var/run/libvirt/libvirt-sock but on TrueNAS
+    # Truenas uses a symlink to /run/... — mount the real /run/... path, since /var/run may not resolve inside this scratch-based container.
+
+
 ```
