@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -35,6 +36,7 @@ func main() {
 		agentTimeout = flag.Duration("agent-timeout", clocks.DefaultAgentTimeout, "how long to allow one guest agent command, e.g. 5s")
 		statsPeriod  = flag.Duration("stats-period", clocks.DefaultStatsPeriod, "how often QEMU refreshes guest balloon stats; 0s shows allocated RAM only")
 		concurrency  = flag.Int("concurrency", 8, "how many VMs to interrogate at once")
+		theme        = flag.String("theme", web.DefaultTheme, "default colour theme: "+strings.Join(web.Themes(), ", "))
 		logLevel     = flag.String("log-level", "info", "debug, info, warn or error")
 		logFormat    = flag.String("log-format", "text", "text or json")
 		showVersion  = flag.Bool("version", false, "print version and exit")
@@ -52,6 +54,10 @@ func main() {
 	}
 	if *statsPeriod != 0 && *statsPeriod < time.Second {
 		fmt.Fprintf(os.Stderr, "pademelon: -stats-period must be 0s (disabled) or at least 1s, got %s\n", *statsPeriod)
+		os.Exit(2)
+	}
+	if !web.ValidTheme(*theme) {
+		fmt.Fprintf(os.Stderr, "pademelon: unknown theme %q, valid themes: %s\n", *theme, strings.Join(web.Themes(), ", "))
 		os.Exit(2)
 	}
 
@@ -100,7 +106,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           web.New(cache, log).Handler(),
+		Handler:           web.New(cache, log, *theme).Handler(),
 		ReadHeaderTimeout: clocks.HeaderReadTimeout,
 	}
 

@@ -1,148 +1,782 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="sweetpea" data-mode="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pademelon</title>
 <style>
 :root {
+  --pd-line: #4a3b5c;
+  --pd-body: #b9a0e0;
+  --pd-ear: #f2b7de;
+  --pd-muz: #fdf6ff;
+  --pd-eye: #2b2438;
+  --pd-nose: #e08cc4;
+  color-scheme: light;
+}
+:root[data-mode="dark"] {
+  --pd-line: #d9cdf2;
+  --pd-eye: #1d1430;
+  color-scheme: dark;
+}
+
+:root[data-theme=sweetpea] {
+  --bg: #f7f2fc;
+  --bg-pattern: repeating-linear-gradient(45deg, rgba(214, 196, 244, 0.28) 0 16px, transparent 16px 32px);
+  --card: #fffdff;
+  --card2: #fbf7ff;
+  --border-dot: #cdb4f2;
+  --border-soft: #e6d9f7;
+  --shadow: #dcc9f5;
+  --text: #463463;
+  --muted: #6f5f92;
+  --accent: #9a6ad8;
+  --accent-soft: #f1e7fd;
+  --ok-bg: #c9f2d3;
+  --ok-tx: #1d5c33;
+  --off-bg: #efeaf5;
+  --off-tx: #575070;
+  --warn-bg: #ffe9b8;
+  --warn-tx: #6d4a05;
+  --bad-bg: #ffd3e0;
+  --bad-tx: #a01a4d;
+  --track: #ece2f8;
+  --fill: linear-gradient(90deg, #b9a0e8, #f0a8d8);
+  --fill-warn: linear-gradient(90deg, #ffd59e, #ffaf87);
+  --fill-bad: linear-gradient(90deg, #ff9eb5, #f26d9d);
+}
+:root[data-theme=sweetpea][data-mode="dark"] {
+  --bg: #1e1631;
+  --bg-pattern: repeating-linear-gradient(45deg, rgba(122, 95, 190, 0.16) 0 16px, transparent 16px 32px);
+  --card: #2b2148;
+  --card2: #251c3e;
+  --border-dot: #7d68b3;
+  --border-soft: #453668;
+  --shadow: #141024;
+  --text: #f0eaff;
+  --muted: #b3a6d6;
+  --accent: #c39bf5;
+  --accent-soft: #43307a;
+  --ok-bg: #1f4630;
+  --ok-tx: #a8e8c0;
+  --off-bg: #3a3352;
+  --off-tx: #c3b9dd;
+  --warn-bg: #4a3814;
+  --warn-tx: #f2cf87;
+  --bad-bg: #512038;
+  --bad-tx: #f4a0bd;
+  --track: #3a2d5e;
+  --fill: linear-gradient(90deg, #b394ec, #eb9ed4);
+  --fill-warn: linear-gradient(90deg, #f2c077, #f0a05e);
+  --fill-bad: linear-gradient(90deg, #f287a8, #e56a92);
+}
+
+:root[data-theme=classic] {
   --bg: #f6f7f9;
-  --panel: #ffffff;
-  --border: #dfe3e8;
+  --bg-pattern: none;
+  --card: #ffffff;
+  --card2: #f1f3f5;
+  --border-dot: #dfe3e8;
+  --border-soft: #e5e7eb;
+  --shadow: #d9dde2;
   --text: #1c2024;
-  --muted: #6b7280;
+  --muted: #626a76;
   --accent: #2563eb;
-  --ok: #16a34a;
-  --warn: #d97706;
-  --bad: #dc2626;
-  --off: #9ca3af;
+  --accent-soft: #e5edfb;
+  --ok-bg: #d8f2e0;
+  --ok-tx: #166534;
+  --off-bg: #eceef1;
+  --off-tx: #4b5563;
+  --warn-bg: #fdeecb;
+  --warn-tx: #92400e;
+  --bad-bg: #fbdcdf;
+  --bad-tx: #b91c1c;
   --track: #e5e7eb;
+  --fill: linear-gradient(90deg, #60a5fa, #2563eb);
+  --fill-warn: linear-gradient(90deg, #fbbf24, #d97706);
+  --fill-bad: linear-gradient(90deg, #f87171, #dc2626);
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #14161a;
-    --panel: #1c1f24;
-    --border: #2c3038;
-    --text: #e6e8eb;
-    --muted: #9199a5;
-    --accent: #60a5fa;
-    --ok: #4ade80;
-    --warn: #fbbf24;
-    --bad: #f87171;
-    --off: #6b7280;
-    --track: #2c3038;
-  }
+:root[data-theme=classic][data-mode="dark"] {
+  --bg: #14161a;
+  --bg-pattern: none;
+  --card: #1c1f24;
+  --card2: #23272e;
+  --border-dot: #3a3f47;
+  --border-soft: #2c3038;
+  --shadow: #0a0c0e;
+  --text: #e6e8eb;
+  --muted: #9aa2ae;
+  --accent: #60a5fa;
+  --accent-soft: #22314a;
+  --ok-bg: #1d3a27;
+  --ok-tx: #7ee2a1;
+  --off-bg: #2b313a;
+  --off-tx: #a8b0bb;
+  --warn-bg: #423312;
+  --warn-tx: #f5c86a;
+  --bad-bg: #45201f;
+  --bad-tx: #f5988f;
+  --track: #2c3038;
+  --fill: linear-gradient(90deg, #60a5fa, #3b82f6);
+  --fill-warn: linear-gradient(90deg, #fbbf24, #f59e0b);
+  --fill-bad: linear-gradient(90deg, #f87171, #ef4444);
 }
+
+:root[data-theme=charm] {
+  --bg: #fffdf5;
+  --bg-pattern: repeating-linear-gradient(-45deg, rgba(255, 123, 245, 0.10) 0 14px, transparent 14px 28px);
+  --card: #fffffe;
+  --card2: #fffaf0;
+  --border-dot: #f3b8e3;
+  --border-soft: #f7dcef;
+  --shadow: #efd8ea;
+  --text: #33265b;
+  --muted: #6f6494;
+  --accent: #6b50ff;
+  --accent-soft: #efecff;
+  --ok-bg: #d2f9ec;
+  --ok-tx: #0b5e46;
+  --off-bg: #f0ebe0;
+  --off-tx: #5f5647;
+  --warn-bg: #ffedbb;
+  --warn-tx: #7a4c06;
+  --bad-bg: #ffd9ec;
+  --bad-tx: #a31576;
+  --track: #f4ecdb;
+  --fill: linear-gradient(90deg, #6b50ff, #ff7bf5);
+  --fill-warn: linear-gradient(90deg, #ffd66b, #ff9d2e);
+  --fill-bad: linear-gradient(90deg, #ff7bf5, #ff4f9e);
+}
+:root[data-theme=charm][data-mode="dark"] {
+  --bg: #1c1240;
+  --bg-pattern: repeating-linear-gradient(-45deg, rgba(255, 123, 245, 0.07) 0 14px, transparent 14px 28px);
+  --card: #291c56;
+  --card2: #221647;
+  --border-dot: #7a5cff;
+  --border-soft: #43337e;
+  --shadow: #120a2b;
+  --text: #fffdf5;
+  --muted: #c4b8ee;
+  --accent: #ff7bf5;
+  --accent-soft: #45327f;
+  --ok-bg: #0f4636;
+  --ok-tx: #5af0c0;
+  --off-bg: #3b2f66;
+  --off-tx: #cdc2ef;
+  --warn-bg: #4d3a0f;
+  --warn-tx: #ffd66b;
+  --bad-bg: #571a4a;
+  --bad-tx: #ff9ade;
+  --track: #3a2c6e;
+  --fill: linear-gradient(90deg, #6b50ff, #ff7bf5);
+  --fill-warn: linear-gradient(90deg, #ffd66b, #ff9d2e);
+  --fill-bad: linear-gradient(90deg, #ff7bf5, #ff4f9e);
+}
+
+:root[data-theme=catppuccin-latte] {
+  --bg: #eff1f5;
+  --bg-pattern: none;
+  --card: #ffffff;
+  --card2: #e6e9ef;
+  --border-dot: #bcc0cc;
+  --border-soft: #ccd0da;
+  --shadow: #d8dce4;
+  --text: #4c4f69;
+  --muted: #5c5f77;
+  --accent: #8839ef;
+  --accent-soft: #ece4fa;
+  --ok-bg: #dbf1d3;
+  --ok-tx: #2f6e21;
+  --off-bg: #e3e5ec;
+  --off-tx: #5d6372;
+  --warn-bg: #f6e7c1;
+  --warn-tx: #7a520b;
+  --bad-bg: #f8d8dd;
+  --bad-tx: #b41531;
+  --track: #dce0e8;
+  --fill: linear-gradient(90deg, #8839ef, #ea76cb);
+  --fill-warn: linear-gradient(90deg, #df8e1d, #fe640b);
+  --fill-bad: linear-gradient(90deg, #d20f39, #e64553);
+}
+
+:root[data-theme=catppuccin-frappe] {
+  --bg: #303446;
+  --bg-pattern: none;
+  --card: #292c3c;
+  --card2: #232634;
+  --border-dot: #626880;
+  --border-soft: #414559;
+  --shadow: #1a1d2b;
+  --text: #c6d3f5;
+  --muted: #a5adce;
+  --accent: #ca9ee6;
+  --accent-soft: #4a4364;
+  --ok-bg: #424d4b;
+  --ok-tx: #a6d189;
+  --off-bg: #414559;
+  --off-tx: #b5bfe2;
+  --warn-bg: #4f4b4d;
+  --warn-tx: #e5c890;
+  --bad-bg: #4f3d51;
+  --bad-tx: #f2a5a7;
+  --track: #414559;
+  --fill: linear-gradient(90deg, #ca9ee6, #f4b8e4);
+  --fill-warn: linear-gradient(90deg, #e5c890, #ef9f76);
+  --fill-bad: linear-gradient(90deg, #e78284, #ea999c);
+}
+
+:root[data-theme=catppuccin-macchiato] {
+  --bg: #24273a;
+  --bg-pattern: none;
+  --card: #1e2030;
+  --card2: #181926;
+  --border-dot: #5b6078;
+  --border-soft: #363a4f;
+  --shadow: #10121d;
+  --text: #cad3f5;
+  --muted: #a5adcb;
+  --accent: #c6a0f6;
+  --accent-soft: #403a58;
+  --ok-bg: #394544;
+  --ok-tx: #a6da95;
+  --off-bg: #363a4f;
+  --off-tx: #b8c0e8;
+  --warn-bg: #484446;
+  --warn-tx: #eed49f;
+  --bad-bg: #473544;
+  --bad-tx: #ed8796;
+  --track: #363a4f;
+  --fill: linear-gradient(90deg, #c6a0f6, #f5bde6);
+  --fill-warn: linear-gradient(90deg, #eed49f, #f5a97f);
+  --fill-bad: linear-gradient(90deg, #ed8796, #ee99a0);
+}
+
+:root[data-theme=catppuccin-mocha] {
+  --bg: #1e1e2e;
+  --bg-pattern: none;
+  --card: #181825;
+  --card2: #11111b;
+  --border-dot: #585b70;
+  --border-soft: #313244;
+  --shadow: #0b0b12;
+  --text: #cdd6f4;
+  --muted: #a6adc8;
+  --accent: #cba6f7;
+  --accent-soft: #3c344f;
+  --ok-bg: #34403e;
+  --ok-tx: #a6e3a1;
+  --off-bg: #313244;
+  --off-tx: #bac2de;
+  --warn-bg: #454041;
+  --warn-tx: #f9e2af;
+  --bad-bg: #442f3f;
+  --bad-tx: #f38ba8;
+  --track: #313244;
+  --fill: linear-gradient(90deg, #cba6f7, #f5c2e7);
+  --fill-warn: linear-gradient(90deg, #f9e2af, #fab387);
+  --fill-bad: linear-gradient(90deg, #f38ba8, #f5a2b6);
+}
+
+:root[data-theme=dracula] {
+  --bg: #191a21;
+  --bg-pattern: none;
+  --card: #21222c;
+  --card2: #282a36;
+  --border-dot: #6272a4;
+  --border-soft: #44475a;
+  --shadow: #0f1015;
+  --text: #f8f8f2;
+  --muted: #9ba5c9;
+  --accent: #bd93f9;
+  --accent-soft: #483f5f;
+  --ok-bg: #2a4d3c;
+  --ok-tx: #50fa7b;
+  --off-bg: #44475a;
+  --off-tx: #d6daee;
+  --warn-bg: #4a4d3f;
+  --warn-tx: #f1fa8c;
+  --bad-bg: #4d2c34;
+  --bad-tx: #ff7d7d;
+  --track: #44475a;
+  --fill: linear-gradient(90deg, #bd93f9, #ff79c6);
+  --fill-warn: linear-gradient(90deg, #f1fa8c, #ffb86c);
+  --fill-bad: linear-gradient(90deg, #ff5555, #ff9db0);
+}
+
+:root[data-theme=noctis] {
+  --bg: #fef8ec;
+  --bg-pattern: none;
+  --card: #fffdf6;
+  --card2: #f9f1e1;
+  --border-dot: #e5c9a8;
+  --border-soft: #efe2c8;
+  --shadow: #e7dbc2;
+  --text: #005661;
+  --muted: #4f6d70;
+  --accent: #e64100;
+  --accent-soft: #f9e8dd;
+  --ok-bg: #d4f0dd;
+  --ok-tx: #006a3e;
+  --off-bg: #eee9da;
+  --off-tx: #6b6455;
+  --warn-bg: #f9ecd0;
+  --warn-tx: #8a6400;
+  --bad-bg: #fadde3;
+  --bad-tx: #b02554;
+  --track: #efe2c8;
+  --fill: linear-gradient(90deg, #5842ff, #ff5792);
+  --fill-warn: linear-gradient(90deg, #fa8900, #ffb85c);
+  --fill-bad: linear-gradient(90deg, #ff530f, #ff7d8f);
+}
+:root[data-theme=noctis][data-mode="dark"] {
+  --bg: #041d20;
+  --bg-pattern: none;
+  --card: #052529;
+  --card2: #062d31;
+  --border-dot: #2f5b60;
+  --border-soft: #17383c;
+  --shadow: #01100f;
+  --text: #b2cacd;
+  --muted: #86a3a9;
+  --accent: #49e9a6;
+  --accent-soft: #0b3a37;
+  --ok-bg: #0c3b2f;
+  --ok-tx: #49e9a6;
+  --off-bg: #17383c;
+  --off-tx: #8fa8ad;
+  --warn-bg: #43331a;
+  --warn-tx: #e4b781;
+  --bad-bg: #46232f;
+  --bad-tx: #df769b;
+  --track: #17383c;
+  --fill: linear-gradient(90deg, #7060eb, #df769b);
+  --fill-warn: linear-gradient(90deg, #e4b781, #e66533);
+  --fill-bad: linear-gradient(90deg, #e3541c, #df769b);
+}
+
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { scrollbar-gutter: stable; }
 body {
   margin: 0;
   padding: 24px;
-  background: var(--bg);
+  background-color: var(--bg);
+  background-image: var(--bg-pattern, none);
   color: var(--text);
-  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
-header {
+h1, h2, h3, .badge, button, select, .status {
+  font-family: ui-rounded, "SF Pro Rounded", "Hiragino Maru Gothic ProN", "Trebuchet MS", system-ui, sans-serif;
+}
+.wrap {
+  max-width: 1180px;
+  margin: 0 auto;
   display: flex;
-  align-items: baseline;
-  gap: 12px;
+  flex-direction: column;
+  gap: 18px;
+}
+.card {
+  background: var(--card);
+  border: 2px dotted var(--border-dot);
+  border-radius: 20px;
+  box-shadow: 0 5px 0 var(--shadow);
+  padding: 18px 20px;
+}
+.card-title {
+  margin: 0 0 14px;
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+.card-title .squig {
+  border-bottom: 3px dotted var(--border-dot);
+}
+
+.masthead {
+  display: flex;
+  align-items: center;
+  gap: 16px;
   flex-wrap: wrap;
-  margin-bottom: 16px;
 }
-h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
-.status { color: var(--muted); font-size: 13px; }
-.status.bad { color: var(--bad); }
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  overflow-x: auto;
+.masthead h1 {
+  margin: 0;
+  font-size: 32px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  border-bottom: 4px dotted var(--pd-ear);
 }
+.tagline { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+.masthead-right {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+.status {
+  color: var(--muted);
+  font-size: 12.5px;
+  background: var(--card2);
+  border: 2px dotted var(--border-soft);
+  border-radius: 999px;
+  padding: 4px 12px;
+  max-width: 480px;
+  word-break: break-word;
+}
+.status.bad {
+  color: var(--bad-tx);
+  background: var(--bad-bg);
+  border-color: var(--bad-bg);
+  font-weight: 700;
+}
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+button {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--card2);
+  border: 2px dotted var(--border-dot);
+  border-radius: 999px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+button:hover { background: var(--accent-soft); }
+button[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-style: solid;
+}
+select {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--card2);
+  border: 2px dotted var(--border-dot);
+  border-radius: 999px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+select:disabled { opacity: 0.55; cursor: not-allowed; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+.vm-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 14px;
+}
+.vm-card {
+  background: var(--card2);
+  border: 2px dotted var(--border-dot);
+  border-radius: 16px;
+  padding: 14px;
+  box-shadow: 0 3px 0 var(--shadow);
+}
+.vm-card header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 2px dotted var(--border-soft);
+  padding-bottom: 8px;
+  margin-bottom: 10px;
+}
+.vm-card h3 { margin: 0; font-size: 15px; }
+.vm-card.stopped { opacity: 0.6; }
+.facts {
+  margin: 0;
+  display: grid;
+  gap: 10px;
+}
+.facts > div {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 8px;
+  align-items: start;
+}
+.facts dt {
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 800;
+  padding-top: 2px;
+}
+.facts dd { margin: 0; min-width: 0; }
+
+.table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; min-width: 900px; }
 th {
   text-align: left;
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
   color: var(--muted);
-  font-weight: 600;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
+  font-weight: 800;
+  padding: 8px 12px;
+  border-bottom: 2px dotted var(--border-dot);
   white-space: nowrap;
 }
 td {
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
+  padding: 12px;
+  border-bottom: 1px dashed var(--border-soft);
   vertical-align: top;
 }
 tr:last-child td { border-bottom: none; }
+tbody tr:hover td { background: var(--card2); }
 tr.stopped td { opacity: 0.55; }
 
-.name { font-weight: 600; }
-.sub { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.name { font-weight: 700; }
+.sub { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
 
 .badge {
   display: inline-block;
-  padding: 2px 8px;
+  padding: 3px 12px;
   border-radius: 999px;
   font-size: 11.5px;
-  font-weight: 600;
+  font-weight: 800;
   white-space: nowrap;
+  box-shadow: 0 2px 0 var(--shadow);
 }
-.badge.running { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
-.badge.stopped { background: color-mix(in srgb, var(--off) 20%, transparent); color: var(--off); }
-.badge.other   { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
-.badge.err     { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
+.badge.running { background: var(--ok-bg); color: var(--ok-tx); }
+.badge.stopped { background: var(--off-bg); color: var(--off-tx); }
+.badge.other   { background: var(--warn-bg); color: var(--warn-tx); }
+.badge.err     { background: var(--bad-bg); color: var(--bad-tx); }
 
 .meter { min-width: 120px; }
 .bar {
-  height: 6px;
+  height: 12px;
   background: var(--track);
-  border-radius: 3px;
+  border-radius: 999px;
+  box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.12);
   overflow: hidden;
   margin-top: 4px;
 }
-.bar > span { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
-.bar > span.warn { background: var(--warn); }
-.bar > span.bad  { background: var(--bad); }
+.bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--fill);
+}
+.bar > span.warn { background: var(--fill-warn); }
+.bar > span.bad  { background: var(--fill-bad); }
 .val { font-variant-numeric: tabular-nums; font-size: 12.5px; }
 
 .fs { margin-bottom: 8px; }
 .fs:last-child { margin-bottom: 0; }
 .dash { color: var(--muted); }
-.empty { padding: 40px; text-align: center; color: var(--muted); }
-footer { margin-top: 14px; color: var(--muted); font-size: 12px; }
+
+.empty {
+  padding: 32px;
+  text-align: center;
+  color: var(--muted);
+}
+.empty-pdm { display: block; margin-bottom: 8px; }
+.empty-pdm .pdm { animation: bob 3s ease-in-out infinite; }
+@keyframes bob {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .empty-pdm .pdm { animation: none; }
+}
+
+.foot {
+  text-align: center;
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 12px 20px;
+}
+.pdm { image-rendering: pixelated; vertical-align: middle; }
+.logo-pdm { flex: none; }
 </style>
+<script>
+(function () {
+  "use strict";
+  var THEMES = {
+    "sweetpea": ["light", "dark"],
+    "classic": ["light", "dark"],
+    "charm": ["light", "dark"],
+    "catppuccin-latte": ["light"],
+    "catppuccin-frappe": ["dark"],
+    "catppuccin-macchiato": ["dark"],
+    "catppuccin-mocha": ["dark"],
+    "dracula": ["dark"],
+    "noctis": ["light", "dark"]
+  };
+  var root = document.documentElement;
+  var theme = root.getAttribute("data-theme");
+  if (!THEMES[theme]) theme = "sweetpea";
+  var mode = "auto";
+  var media = window.matchMedia("(prefers-color-scheme: dark)");
+  try {
+    var savedTheme = localStorage.getItem("pademelon.theme");
+    if (savedTheme && THEMES[savedTheme]) theme = savedTheme;
+    var savedMode = localStorage.getItem("pademelon.mode");
+    if (savedMode === "auto" || savedMode === "light" || savedMode === "dark") mode = savedMode;
+  } catch (e) {}
+  function resolve() {
+    var variants = THEMES[theme];
+    if (variants.length === 1) return variants[0];
+    var wantsDark = mode === "dark" || (mode === "auto" && media.matches);
+    return wantsDark ? "dark" : "light";
+  }
+  function apply() {
+    root.setAttribute("data-theme", theme);
+    root.setAttribute("data-mode", resolve());
+  }
+  media.addEventListener("change", function () {
+    if (mode === "auto") apply();
+  });
+  apply();
+  window.__pdTheme = {
+    themes: THEMES,
+    get theme() { return theme; },
+    get mode() { return mode; },
+    setTheme: function (t) {
+      if (!THEMES[t]) return;
+      theme = t;
+      try { localStorage.setItem("pademelon.theme", t); } catch (e) {}
+      apply();
+    },
+    setMode: function (m) {
+      if (m !== "auto" && m !== "light" && m !== "dark") return;
+      mode = m;
+      try { localStorage.setItem("pademelon.mode", m); } catch (e) {}
+      apply();
+    }
+  };
+})();
+</script>
 </head>
 <body>
 
-<header>
-  <h1>Pademelon</h1>
-  <span class="status" id="status">loading…</span>
-</header>
+<div class="wrap">
 
-<div class="panel">
-  <table>
-    <thead>
-      <tr>
-        <th>VM</th>
-        <th>State</th>
-        <th>CPU</th>
-        <th>Memory</th>
-        <th>Addresses</th>
-        <th>OS</th>
-        <th>Storage</th>
-      </tr>
-    </thead>
-    <tbody id="rows"></tbody>
-  </table>
-  <div class="empty" id="empty" hidden>No VMs found.</div>
+  <header class="card masthead">
+    <span class="logo-pdm" id="logo-pdm" aria-hidden="true"></span>
+    <div>
+      <h1>pademelon</h1>
+      <p class="tagline">a soft little window into your NAS ✿</p>
+    </div>
+    <div class="masthead-right">
+      <span class="status" id="status">loading…</span>
+      <div class="controls" role="group" aria-label="View and appearance">
+        <button id="btn-table" aria-pressed="false">table view</button>
+        <button id="btn-cards" aria-pressed="true">card view</button>
+        <label class="ctl">theme
+          <select id="theme-select" aria-label="Colour theme">
+            <optgroup label="pademelon">
+              <option value="sweetpea">sweetpea</option>
+              <option value="classic">classic</option>
+              <option value="charm">charm</option>
+            </optgroup>
+            <optgroup label="catppuccin">
+              <option value="catppuccin-latte">latte</option>
+              <option value="catppuccin-frappe">frappé</option>
+              <option value="catppuccin-macchiato">macchiato</option>
+              <option value="catppuccin-mocha">mocha</option>
+            </optgroup>
+            <optgroup label="more">
+              <option value="dracula">dracula</option>
+              <option value="noctis">noctis</option>
+            </optgroup>
+          </select>
+        </label>
+        <label class="ctl">mode
+          <select id="mode-select" aria-label="Light or dark mode">
+            <option value="auto">auto</option>
+            <option value="light">light</option>
+            <option value="dark">dark</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2 class="card-title"><span class="squig">vm garden</span> <span aria-hidden="true">🌷</span></h2>
+      <div id="table-view" hidden>
+        <table>
+          <thead>
+            <tr>
+              <th>VM</th>
+              <th>State</th>
+              <th>CPU</th>
+              <th>Memory</th>
+              <th>Addresses</th>
+              <th>OS</th>
+              <th>Storage</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <ul class="vm-grid" id="grid"></ul>
+      <div class="empty" id="empty" hidden>
+        <span class="empty-pdm" id="empty-pdm" aria-hidden="true"></span>
+        <p>no VMs found… the paddock is empty!</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="card foot" id="foot"></footer>
+
 </div>
-
-<footer id="foot"></footer>
 
 <script>
 const REFRESH_MS = 1500;
+
+const PDM_MAP = [
+  "..oo....oo..",
+  ".obeo..oebo.",
+  ".obeo..oebo.",
+  ".obboooobbo.",
+  ".obbbbbbbbo.",
+  ".obbbbbbbbo.",
+  ".obybbbbybo.",
+  ".obbbnnbbbo.",
+  ".obllllllbo.",
+  ".obbllllbbo.",
+  "..obbbbbbo..",
+  "...oooooo..."
+];
+const PDM_PAL = {
+  o: "var(--pd-line)",
+  b: "var(--pd-body)",
+  e: "var(--pd-ear)",
+  l: "var(--pd-muz)",
+  y: "var(--pd-eye)",
+  n: "var(--pd-nose)"
+};
+
+function pdmSVG(px) {
+  const w = PDM_MAP[0].length;
+  const h = PDM_MAP.length;
+  let r = "";
+  PDM_MAP.forEach((row, y) => {
+    [...row].forEach((c, x) => {
+      if (PDM_PAL[c]) r += `<rect x="${x}" y="${y}" width="1.03" height="1.03" fill="${PDM_PAL[c]}"/>`;
+    });
+  });
+  return `<svg class="pdm" width="${w * px}" height="${h * px}" viewBox="0 0 ${w} ${h}" shape-rendering="crispEdges" role="img" aria-label="Pademelon mascot">${r}</svg>`;
+}
 
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, c => (
@@ -206,6 +840,12 @@ function storage(vm) {
   }).join("");
 }
 
+function osHtml(vm) {
+  return vm.os
+    ? `<div>${esc(vm.os)}</div>` + (vm.kernel ? `<div class="sub mono">${esc(vm.kernel)}</div>` : "")
+    : `<span class="dash">—</span>`;
+}
+
 function row(vm) {
   const cpu = vm.running
     ? (vm.cpuKnown ? meter(vm.cpuPercent, vm.cpuPercent.toFixed(1) + "%")
@@ -219,10 +859,6 @@ function row(vm) {
         : `<div class="val sub">${fmtKiB(vm.memTotalKiB)} allocated</div>`)
     : `<div class="val sub">${fmtKiB(vm.memTotalKiB)} allocated</div>`;
 
-  const os = vm.os
-    ? `<div>${esc(vm.os)}</div>` + (vm.kernel ? `<div class="sub mono">${esc(vm.kernel)}</div>` : "")
-    : `<span class="dash">—</span>`;
-
   return `<tr class="${vm.running ? "" : "stopped"}">
     <td>
       <div class="name">${esc(vm.hostname || vm.name)}</div>
@@ -233,10 +869,42 @@ function row(vm) {
     <td>${cpu}</td>
     <td>${mem}</td>
     <td>${addresses(vm)}</td>
-    <td>${os}</td>
+    <td>${osHtml(vm)}</td>
     <td>${storage(vm)}</td>
   </tr>`;
 }
+
+function cardVM(vm) {
+  const cpu = vm.running
+    ? (vm.cpuKnown ? meter(vm.cpuPercent, vm.cpuPercent.toFixed(1) + "%")
+                   : `<span class="dash">measuring…</span>`)
+    : `<span class="dash">—</span>`;
+
+  const mem = vm.running && vm.memKnown
+    ? meter(vm.memUsedKiB / vm.memTotalKiB * 100,
+            `${fmtKiB(vm.memUsedKiB)} / ${fmtKiB(vm.memTotalKiB)}`)
+    : `<div class="val sub">${fmtKiB(vm.memTotalKiB)} allocated</div>`;
+
+  return `<li><article class="vm-card ${vm.running ? "" : "stopped"}">
+    <header>
+      <div>
+        <h3 class="name">${esc(vm.hostname || vm.name)}</h3>
+        <div class="sub">${esc(vm.domain)} · ${vm.vcpus} vCPU</div>
+        ${agentNote(vm)}
+      </div>
+      ${stateBadge(vm)}
+    </header>
+    <dl class="facts">
+      <div><dt>CPU</dt><dd>${cpu}</dd></div>
+      <div><dt>Memory</dt><dd>${mem}</dd></div>
+      <div><dt>Addresses</dt><dd>${addresses(vm)}</dd></div>
+      <div><dt>OS</dt><dd>${osHtml(vm)}</dd></div>
+      <div><dt>Storage</dt><dd>${storage(vm)}</dd></div>
+    </dl>
+  </article></li>`;
+}
+
+const state = { view: "cards" };
 
 async function tick() {
   const statusEl = document.getElementById("status");
@@ -250,7 +918,13 @@ async function tick() {
       return (a.name || "").localeCompare(b.name || "");
     });
 
-    document.getElementById("rows").innerHTML = vms.map(row).join("");
+    document.getElementById("table-view").hidden = state.view !== "table";
+    document.getElementById("grid").hidden = state.view !== "cards";
+    if (state.view === "table") {
+      document.getElementById("rows").innerHTML = vms.map(row).join("");
+    } else {
+      document.getElementById("grid").innerHTML = vms.map(cardVM).join("");
+    }
     document.getElementById("empty").hidden = vms.length > 0;
 
     if (snap.connected) {
@@ -261,12 +935,54 @@ async function tick() {
       statusEl.textContent = `libvirt disconnected — showing last known data. ${snap.error || ""}`;
     }
     document.getElementById("foot").textContent =
-      "Refreshes every " + (REFRESH_MS / 1000) + "s.";
+      "refreshes every " + (REFRESH_MS / 1000) + "s · read-only · made with ♥ (˶ˆᗜˆ˵)";
   } catch (e) {
     statusEl.className = "status bad";
     statusEl.textContent = "can't reach Pademelon: " + e.message;
   }
 }
+
+document.getElementById("logo-pdm").innerHTML = pdmSVG(4);
+document.getElementById("empty-pdm").innerHTML = pdmSVG(9);
+
+document.getElementById("btn-table").addEventListener("click", () => {
+  state.view = "table";
+  paintViewButtons();
+  tick();
+});
+document.getElementById("btn-cards").addEventListener("click", () => {
+  state.view = "cards";
+  paintViewButtons();
+  tick();
+});
+
+function paintViewButtons() {
+  document.getElementById("btn-table").setAttribute("aria-pressed", String(state.view === "table"));
+  document.getElementById("btn-cards").setAttribute("aria-pressed", String(state.view === "cards"));
+}
+
+function paintAppearance() {
+  if (!window.__pdTheme) return;
+  const themeSelect = document.getElementById("theme-select");
+  const modeSelect = document.getElementById("mode-select");
+  themeSelect.value = window.__pdTheme.theme;
+  modeSelect.value = window.__pdTheme.mode;
+  const singleVariant = window.__pdTheme.themes[window.__pdTheme.theme].length < 2;
+  modeSelect.disabled = singleVariant;
+  modeSelect.title = singleVariant ? "this theme has one fixed variant" : "";
+}
+
+const themeSelect = document.getElementById("theme-select");
+const modeSelect = document.getElementById("mode-select");
+themeSelect.addEventListener("change", () => {
+  if (window.__pdTheme) window.__pdTheme.setTheme(themeSelect.value);
+  paintAppearance();
+});
+modeSelect.addEventListener("change", () => {
+  if (window.__pdTheme) window.__pdTheme.setMode(modeSelect.value);
+  paintAppearance();
+});
+paintAppearance();
 
 tick();
 setInterval(tick, REFRESH_MS);

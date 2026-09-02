@@ -10,6 +10,8 @@ I review all code manually. I know what each line of code does, why, how and whe
 
 I am not sure what we are calling it now but think agentic coding, AI assisted, what ever buzzword it is this week.
 
+The whole idea of this project is for me to learn something new. I could absolutely point a bunch of agents at this for a few days and be done with it, I do not want to do that at all. I want to learn and build it myself with assistance. 
+
 Code used here is a mixture of:
 - Organically farmed (hand written)
 - Copied, pasted and modified to fit the existing code

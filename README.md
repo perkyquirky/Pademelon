@@ -29,6 +29,7 @@ Windows and Linux (tested Windows Server 2022 & Ubuntu Server 24.04.4 LTS)
 - IP address & interface ID
 - Host OS - kernel (Linux) / OS build (Windows)
 - Drive partitions & usage
+- Colour themes — nine built in, pick one in the page header or set the server default with `-theme`
 
 ## Currently unsupported:
 

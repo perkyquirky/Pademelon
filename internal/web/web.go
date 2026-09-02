@@ -6,6 +6,7 @@
 package web
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/json"
 	"log/slog"
@@ -18,18 +19,30 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
+// themePlaceholder is the attribute value in index.html's <html> tag that
+// gets swapped for the configured default theme. It is quoted, which CSS
+// selectors in the page deliberately are not, so this string matches the
+// tag and nothing else.
+const themePlaceholder = `data-theme="` + DefaultTheme + `"`
+
 // Server wires the cache to HTTP.
 type Server struct {
 	cache *model.Cache
 	log   *slog.Logger
+	theme string
 }
 
-// New returns a Server reading from cache.
-func New(cache *model.Cache, log *slog.Logger) *Server {
+// New returns a Server reading from cache. theme is the default colour theme
+// sent to browsers that haven't picked one themselves; validate it with
+// ValidTheme before calling.
+func New(cache *model.Cache, log *slog.Logger, theme string) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{cache: cache, log: log}
+	if theme == "" {
+		theme = DefaultTheme
+	}
+	return &Server{cache: cache, log: log, theme: theme}
 }
 
 // Handler returns the routes.
@@ -50,7 +63,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(indexHTML)
+	_, _ = w.Write(bytes.ReplaceAll(indexHTML,
+		[]byte(themePlaceholder),
+		[]byte(`data-theme="`+s.theme+`"`)))
 }
 
 func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
