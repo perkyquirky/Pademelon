@@ -34,3 +34,48 @@ Also they are adorable.
 - Any write operations e.g:
   - Stop / restart
   - Any kind of writing to the VM
+
+## Docker Compose
+
+There is a compose file in the root directory of this repository for you to copy.
+
+You can adjust settings in the compose file with the following:
+
+``` yaml
+services:
+  pademelon:
+    image: ghcr.io/perkyquirky/pademelon:latest
+    container_name: pademelon
+    restart: unless-stopped
+
+    ports:
+      - "8088:8088"
+
+    volumes:
+      - /run/truenas_libvirt:/run/truenas_libvirt
+    user: "0:0"
+
+    command:
+    # -listen changes the internal listen port, dont change unless you know why you would
+      - "-listen=:8088"
+
+    # Sets how many VM's to poll at once. If you have more than 8, increase this number
+      - "-concurrency=8"
+
+    # This sets the polling rate for all stats. As the data needs to be queried to the libvirt socket manually to get fresh data this needs to be set.
+    # CPU usage, memory usage, network info, drive data, agent status, etc. are all controlled with this timer. 
+      - "-interval=30s"
+
+    # As a single timer is used to poll for data from the VM, if one stat hangs, for example hard drive data is not returned, 
+    # the time out is set to 5 seconds to ensure the other data is successfully returned.
+      - "-agent-timeout=5s"
+
+    # This is required to get fresh memory statistics, without it stale data is returned. Do not adjust unless necessary
+      - "-stats-period=10s"
+    
+    # Sets the level of logging: `info`, `debug`, `info`, `warn`, `error` 
+      - "-log-level=info"
+
+    # Sets the logging output format:  `text`, `text`, `json`
+      - "-log-format=text"
+```
