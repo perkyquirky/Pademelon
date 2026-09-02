@@ -161,6 +161,10 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 		if bearerOK {
 			if !cookieOK {
 				http.SetCookie(w, s.sessionCookie(r))
+				// A fresh login, not just a request riding an existing
+				// cookie. Cookie-authenticated requests stay silent — the
+				// page fetches every 1.5s and would fill the logs.
+				s.log.Info("auth: login succeeded, session cookie issued", "remote", remoteIP(r))
 			}
 			s.auth.clearFailures(remoteIP(r))
 			next.ServeHTTP(w, r)
@@ -203,6 +207,30 @@ func (s *Server) handleAuthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write([]byte("{\"authenticated\":true}\n"))
+}
+
+// clearSessionCookie builds the Set-Cookie that deletes the session cookie
+// in the browser: same attributes as issued, Max-Age 0, value emptied. The
+// server keeps no session state, so logout is purely a browser-side
+// clearance — the token itself is unchanged and a stolen token would still
+// work; token rotation remains the real revoke switch.
+func (s *Server) clearSessionCookie(r *http.Request) *http.Cookie {
+	c := s.sessionCookie(r)
+	c.Value = ""
+	c.MaxAge = -1 // delete now
+	return c
+}
+
+// handleAuthLogout clears the session cookie, logging the browser out. It
+// is a GET to keep the house GET-only rule intact; the worst a cross-site
+// top-level navigation could do is log you out, which SameSite=Lax already
+// requires a real navigation for. Annoyance-class, not security-class.
+func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, s.clearSessionCookie(r))
+	s.log.Info("auth: logged out", "remote", remoteIP(r))
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_, _ = w.Write([]byte("{\"loggedOut\":true}\n"))
 }
 
 // remoteIP is the backoff key. Behind a reverse proxy every request shares

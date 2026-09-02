@@ -55,6 +55,10 @@ func TestAuthDisabledKeepsPublicTier(t *testing.T) {
 	if code != http.StatusNotFound {
 		t.Errorf("auth/check with auth disabled = %d, want 404 (route must not exist)", code)
 	}
+	code, _, _ = doGetBody(s, "/api/auth/logout", nil)
+	if code != http.StatusNotFound {
+		t.Errorf("auth/logout with auth disabled = %d, want 404 (route must not exist)", code)
+	}
 
 	code, _, _ = doGetBody(s, "/api/vms", nil)
 	if code != http.StatusOK {
@@ -167,6 +171,59 @@ func TestBearerWrongTokenRejected(t *testing.T) {
 	}
 }
 
+// TestLogoutClearsCookie walks login → logout: the logout response must
+// delete the cookie in the browser (Max-Age 0, value emptied, same
+// attributes so the browser matches it), and afterwards the old cookie no
+// longer authenticates anything.
+func TestLogoutClearsCookie(t *testing.T) {
+	s := newTestServer("tok-123")
+
+	// Log in.
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer tok-123")
+	code, res, _ := doGetBody(s, "/api/auth/check", hdr)
+	if code != http.StatusOK {
+		t.Fatalf("login = %d, want 200", code)
+	}
+	cookie := res.Cookies()[0]
+
+	// Log out with the cookie.
+	code, res, _ = doGetBody(s, "/api/auth/logout", http.Header{"Cookie": []string{cookie.String()}})
+	if code != http.StatusOK {
+		t.Fatalf("logout = %d, want 200", code)
+	}
+	logout := res.Cookies()
+	if len(logout) != 1 {
+		t.Fatalf("logout issued %d cookies, want 1", len(logout))
+	}
+	lc := logout[0]
+	if lc.Name != sessionCookieName {
+		t.Errorf("logout cookie name = %q, want %q", lc.Name, sessionCookieName)
+	}
+	if lc.Value != "" {
+		t.Errorf("logout cookie value = %q, want empty", lc.Value)
+	}
+	if lc.MaxAge != -1 {
+		t.Errorf("logout cookie MaxAge = %d, want -1 (delete now)", lc.MaxAge)
+	}
+	if !lc.HttpOnly || lc.SameSite != http.SameSiteLaxMode {
+		t.Error("logout cookie must mirror the issued cookie's attributes so the browser replaces it")
+	}
+
+	// A browser that applied the deletion sends no usable cookie anymore.
+	code, _, _ = doGetBody(s, "/api/auth/check", http.Header{"Cookie": []string{lc.String()}})
+	if code != http.StatusUnauthorized {
+		t.Errorf("auth/check after logout = %d, want 401", code)
+	}
+
+	// Logout requires credentials too — you can't log out an anonymous
+	// session that doesn't exist.
+	code, _, _ = doGetBody(s, "/api/auth/logout", nil)
+	if code != http.StatusUnauthorized {
+		t.Errorf("logout without credentials = %d, want 401", code)
+	}
+}
+
 // TestBackoffSequence pins the exponential progression so a refactor can't
 // quietly flatten or explode it.
 func TestBackoffSequence(t *testing.T) {
@@ -223,6 +280,7 @@ func TestAuthMarkupSyncWithPage(t *testing.T) {
 	for _, want := range []string{
 		`fetch("/api/capabilities"`,
 		`fetch("/api/auth/check"`,
+		`fetch("/api/auth/logout"`,
 		`type="password"`,
 		`autocomplete="current-password"`,
 		`id="btn-auth"`,
@@ -231,6 +289,11 @@ func TestAuthMarkupSyncWithPage(t *testing.T) {
 		if !strings.Contains(page, want) {
 			t.Errorf("index.html missing %q", want)
 		}
+	}
+
+	// Card view is gone; the masthead must not reference it either.
+	if strings.Contains(page, "btn-cards") || strings.Contains(page, "vm-grid") {
+		t.Error("index.html still contains card view remnants")
 	}
 
 	if n := strings.Count(page, themePlaceholder); n != 1 {

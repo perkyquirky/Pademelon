@@ -454,10 +454,16 @@ button {
   cursor: pointer;
 }
 button:hover { background: var(--accent-soft); }
-button[aria-pressed="true"] {
-  background: var(--accent-soft);
-  border-style: solid;
+
+/* Masthead pills get solid borders: CSS `dotted` renders unevenly around a
+   full-pill curve (dot spacing isn't controllable), and the mix of solid and
+   dotted pills in one row made it obvious. Panels and the table keep the
+   dotted/dashed handmade look. */
+.controls button,
+.controls select {
+  border: 2px solid var(--border-dot);
 }
+.controls button:hover { border-color: var(--accent); }
 select {
   font-size: 12.5px;
   font-weight: 700;
@@ -471,11 +477,7 @@ select {
 select:disabled { opacity: 0.55; cursor: not-allowed; }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 
-#btn-auth.auth-ok {
-  border-style: solid;
-  color: var(--muted);
-  cursor: default;
-}
+#btn-auth.auth-ok { color: var(--muted); }
 dialog {
   border: 2px dotted var(--border-dot);
   border-radius: 20px;
@@ -502,53 +504,6 @@ dialog .card-title { margin-bottom: 4px; }
 #auth-form input:focus { border-style: solid; outline: none; }
 .auth-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
 .auth-msg { color: var(--bad-tx); font-size: 12px; font-weight: 700; margin-right: auto; }
-
-.vm-grid {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 14px;
-}
-.vm-card {
-  background: var(--card2);
-  border: 2px dotted var(--border-dot);
-  border-radius: 16px;
-  padding: 14px;
-  box-shadow: 0 3px 0 var(--shadow);
-}
-.vm-card header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  border-bottom: 2px dotted var(--border-soft);
-  padding-bottom: 8px;
-  margin-bottom: 10px;
-}
-.vm-card h3 { margin: 0; font-size: 15px; }
-.vm-card.stopped { opacity: 0.6; }
-.facts {
-  margin: 0;
-  display: grid;
-  gap: 10px;
-}
-.facts > div {
-  display: grid;
-  grid-template-columns: 84px 1fr;
-  gap: 8px;
-  align-items: start;
-}
-.facts dt {
-  color: var(--muted);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  font-weight: 800;
-  padding-top: 2px;
-}
-.facts dd { margin: 0; min-width: 0; }
 
 .table-scroll { overflow-x: auto; }
 table { width: 100%; border-collapse: collapse; min-width: 900px; }
@@ -708,9 +663,7 @@ tr.stopped td { opacity: 0.55; }
     </div>
     <div class="masthead-right">
       <span class="status" id="status">loading…</span>
-      <div class="controls" role="group" aria-label="View and appearance">
-        <button id="btn-table" aria-pressed="false">table view</button>
-        <button id="btn-cards" aria-pressed="true">card view</button>
+      <div class="controls" role="group" aria-label="Appearance">
         <label class="ctl">theme
           <select id="theme-select" aria-label="Colour theme">
             <optgroup label="pademelon">
@@ -737,7 +690,7 @@ tr.stopped td { opacity: 0.55; }
             <option value="dark">dark</option>
           </select>
         </label>
-        <button id="btn-auth" hidden title="unlock this browser for private routes">🔒 log in</button>
+        <button id="btn-auth" hidden title="log in to unlock private routes">log in</button>
       </div>
     </div>
   </header>
@@ -745,7 +698,7 @@ tr.stopped td { opacity: 0.55; }
   <main>
     <section class="card">
       <h2 class="card-title"><span class="squig">vm garden</span> <span aria-hidden="true">🌷</span></h2>
-      <div id="table-view" hidden>
+      <div class="table-scroll">
         <table>
           <thead>
             <tr>
@@ -761,7 +714,6 @@ tr.stopped td { opacity: 0.55; }
           <tbody id="rows"></tbody>
         </table>
       </div>
-      <ul class="vm-grid" id="grid"></ul>
       <div class="empty" id="empty" hidden>
         <span class="empty-pdm" id="empty-pdm" aria-hidden="true"></span>
         <p>no VMs found… the paddock is empty!</p>
@@ -775,8 +727,8 @@ tr.stopped td { opacity: 0.55; }
 
 <dialog id="auth-dialog">
   <form id="auth-form" autocomplete="on">
-    <h2 class="card-title"><span class="squig">log in</span> <span aria-hidden="true">🔒</span></h2>
-    <p class="auth-hint">paste this instance's token (generate one with <code>openssl rand -hex 32</code>)</p>
+    <h2 class="card-title"><span class="squig">log in</span></h2>
+    <p class="auth-hint">paste this instance's token or password (generate one with "openssl rand -hex 32")</p>
     <input type="password" id="token" name="token" autocomplete="current-password"
            placeholder="token" required spellcheck="false">
     <div class="auth-row">
@@ -921,38 +873,7 @@ function row(vm) {
   </tr>`;
 }
 
-function cardVM(vm) {
-  const cpu = vm.running
-    ? (vm.cpuKnown ? meter(vm.cpuPercent, vm.cpuPercent.toFixed(1) + "%")
-                   : `<span class="dash">measuring…</span>`)
-    : `<span class="dash">—</span>`;
-
-  const mem = vm.running && vm.memKnown
-    ? meter(vm.memUsedKiB / vm.memTotalKiB * 100,
-            `${fmtKiB(vm.memUsedKiB)} / ${fmtKiB(vm.memTotalKiB)}`)
-    : `<div class="val sub">${fmtKiB(vm.memTotalKiB)} allocated</div>`;
-
-  return `<li><article class="vm-card ${vm.running ? "" : "stopped"}">
-    <header>
-      <div>
-        <h3 class="name">${esc(vm.hostname || vm.name)}</h3>
-        <div class="sub">${esc(vm.domain)} · ${vm.vcpus} vCPU</div>
-        ${agentNote(vm)}
-      </div>
-      ${stateBadge(vm)}
-    </header>
-    <dl class="facts">
-      <div><dt>CPU</dt><dd>${cpu}</dd></div>
-      <div><dt>Memory</dt><dd>${mem}</dd></div>
-      <div><dt>Addresses</dt><dd>${addresses(vm)}</dd></div>
-      <div><dt>OS</dt><dd>${osHtml(vm)}</dd></div>
-      <div><dt>Storage</dt><dd>${storage(vm)}</dd></div>
-    </dl>
-  </article></li>`;
-}
-
-const state = { view: "cards" };
-const stores = { table: new Map(), cards: new Map() };
+const store = new Map();
 
 function sig(vm) {
   const ips = [];
@@ -1005,23 +926,6 @@ function updateValues(refs, vm) {
   });
 }
 
-function buildCard(vm) {
-  const li = fromHTML(cardVM(vm));
-  const card = li.firstElementChild;
-  const dds = card.querySelectorAll(".facts > div > dd");
-  return {
-    el: li, sig: sig(vm),
-    refs: {
-      card: card,
-      badge: card.querySelector(".badge"),
-      cpuMeter: dds[0].querySelector(".meter"),
-      memMeter: dds[1].querySelector(".meter"),
-      memVal: dds[1].querySelector(".val.sub"),
-      fsMeters: [...card.querySelectorAll(".facts .fs .meter")]
-    }
-  };
-}
-
 function buildRow(vm) {
   const tr = fromHTML(row(vm));
   return {
@@ -1054,11 +958,9 @@ function selectionTouches(el) {
 }
 
 function renderVMs(vms) {
-  const isTable = state.view === "table";
-  const host = document.getElementById(isTable ? "rows" : "grid");
-  const store = stores[state.view];
+  const host = document.getElementById("rows");
   const frozen = frozenSet(store);
-  const build = isTable ? buildRow : buildCard;
+  const build = buildRow;
 
   const seen = new Set();
   const ordered = [];
@@ -1082,8 +984,7 @@ function renderVMs(vms) {
       entry = fresh;
     } else {
       updateValues(entry.refs, vm);
-      if (isTable) entry.el.classList.toggle("stopped", !vm.running);
-      else entry.refs.card.classList.toggle("stopped", !vm.running);
+      entry.el.classList.toggle("stopped", !vm.running);
     }
     ordered.push(entry.el);
   }
@@ -1119,8 +1020,6 @@ async function tick() {
       return (a.name || "").localeCompare(b.name || "");
     });
 
-    document.getElementById("table-view").hidden = state.view !== "table";
-    document.getElementById("grid").hidden = state.view !== "cards";
     renderVMs(vms);
 
     if (!selectionTouches(statusEl)) {
@@ -1144,22 +1043,6 @@ async function tick() {
 
 document.getElementById("logo-pdm").innerHTML = pdmSVG(4);
 document.getElementById("empty-pdm").innerHTML = pdmSVG(9);
-
-document.getElementById("btn-table").addEventListener("click", () => {
-  state.view = "table";
-  paintViewButtons();
-  tick();
-});
-document.getElementById("btn-cards").addEventListener("click", () => {
-  state.view = "cards";
-  paintViewButtons();
-  tick();
-});
-
-function paintViewButtons() {
-  document.getElementById("btn-table").setAttribute("aria-pressed", String(state.view === "table"));
-  document.getElementById("btn-cards").setAttribute("aria-pressed", String(state.view === "cards"));
-}
 
 function paintAppearance() {
   if (!window.__pdTheme) return;
@@ -1195,7 +1078,8 @@ const authMsg = document.getElementById("auth-msg");
 let authOK = false;
 
 function paintAuth() {
-  btnAuth.textContent = authOK ? "🔒 auth ok" : "🔒 log in";
+  btnAuth.textContent = authOK ? "log out" : "log in";
+  btnAuth.title = authOK ? "clear this browser's session" : "log in to unlock private routes";
   btnAuth.classList.toggle("auth-ok", authOK);
 }
 
@@ -1215,7 +1099,17 @@ async function checkCapabilities() {
   }
 }
 
-btnAuth.addEventListener("click", () => {
+btnAuth.addEventListener("click", async () => {
+  if (authOK) {
+    try {
+      await fetch("/api/auth/logout", { cache: "no-store" });
+    } catch (e) {
+      // server unreachable — clear locally anyway so the UI reflects intent
+    }
+    authOK = false;
+    paintAuth();
+    return;
+  }
   authMsg.textContent = "";
   authDialog.showModal();
 });

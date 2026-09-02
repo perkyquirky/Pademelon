@@ -65,7 +65,7 @@ You can use a password of your choosing or generate a random string with:
 openssl rand -hex 32
 ```
 
-Then pass that value to the container as the `PADAMELON_TOKEN` environment variable, or via a Docker secret file with `PADAMELON_TOKEN_FILE`. A "🔒 log in" button appears in the page header; enter the token once per browser and you stay logged in for 30 days.
+Then pass that value to the container as the `PADAMELON_TOKEN` environment variable, or via a Docker secret file with `PADAMELON_TOKEN_FILE`. A "log in" button appears in the page header; enter the token once per browser and you stay logged in for 30 days, with a "log out" button to clear the session.
 
 ## Use via compose example: auth
 
@@ -78,7 +78,7 @@ services:
     ports:
       - "8088:8088"
     environment:
-      # Generate with: openssl rand -hex 32
+      # Generate with: openssl rand -hex 32 or use a password of your choice. 
       - PADAMELON_TOKEN=change-me-to-your-generated-token
     volumes:
       - /run/truenas_libvirt:/run/truenas_libvirt

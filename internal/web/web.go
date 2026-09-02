@@ -64,6 +64,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/capabilities", s.handleCapabilities)
 	if s.auth.token != "" {
 		mux.Handle("GET /api/auth/check", s.requireToken(http.HandlerFunc(s.handleAuthCheck)))
+		mux.Handle("GET /api/auth/logout", s.requireToken(http.HandlerFunc(s.handleAuthLogout)))
 	}
 	return s.logRequests(mux)
 }

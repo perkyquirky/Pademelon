@@ -77,8 +77,8 @@ services:
 #
 # With a token set, a "log in" button appears on the page. Enter it once
 # per browser (password managers can save it); you stay logged in for 30
-# days via a HttpOnly, SameSite=Lax cookie. Rotating the token logs every
-# browser out at once.
+# days via a HttpOnly, SameSite=Lax cookie. "log out" clears it. Rotating
+# the token logs every browser out at once.
 # ---------------------------------------------------------------
 
 secrets:
