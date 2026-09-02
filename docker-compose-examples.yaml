@@ -52,3 +52,35 @@ services:
     # new file. Always mount the directory, not the socket file: libvirtd deletes
     # and recreates the socket when it restarts, and a mounted file goes dead.
       - "-socket=/run/truenas_libvirt/libvirt-sock"
+
+# ---------------------------------------------------------------
+# Optional token auth — Planned usage for later to allow for VM 
+# commands to be issued. This is required to ensure that no one
+# on the local network can make changes to VM's without
+# authentication. This is NOT a valid security measure for 
+# internet facing traffic. 
+#
+# Generate a token with:  openssl rand -hex 32
+# or use a password of your choosing. 
+#
+# Two ways to hand it to the container:
+#
+# 1) Environment variable (simple, but visible in `docker inspect`):
+#    environment:
+#      - PADAMELON_TOKEN=<your generated token>
+#
+# 2) Docker secrets file (keeps the value out of compose and inspect):
+#    environment:
+#      - PADAMELON_TOKEN_FILE=/run/secrets/pademelon_token
+#    secrets:
+#      - pademelon_token
+#
+# With a token set, a "log in" button appears on the page. Enter it once
+# per browser (password managers can save it); you stay logged in for 30
+# days via a HttpOnly, SameSite=Lax cookie. Rotating the token logs every
+# browser out at once.
+# ---------------------------------------------------------------
+
+secrets:
+  pademelon_token:
+    file: ./pademelon_token.txt

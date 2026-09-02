@@ -471,6 +471,38 @@ select {
 select:disabled { opacity: 0.55; cursor: not-allowed; }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 
+#btn-auth.auth-ok {
+  border-style: solid;
+  color: var(--muted);
+  cursor: default;
+}
+dialog {
+  border: 2px dotted var(--border-dot);
+  border-radius: 20px;
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 5px 0 var(--shadow);
+  padding: 18px 20px;
+  max-width: 340px;
+  width: calc(100vw - 48px);
+}
+dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+dialog .card-title { margin-bottom: 4px; }
+.auth-hint { color: var(--muted); font-size: 12.5px; margin: 0 0 12px; }
+#auth-form input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  color: var(--text);
+  background: var(--card2);
+  border: 2px dotted var(--border-dot);
+  border-radius: 12px;
+  padding: 8px 12px;
+}
+#auth-form input:focus { border-style: solid; outline: none; }
+.auth-row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.auth-msg { color: var(--bad-tx); font-size: 12px; font-weight: 700; margin-right: auto; }
+
 .vm-grid {
   list-style: none;
   margin: 0;
@@ -705,6 +737,7 @@ tr.stopped td { opacity: 0.55; }
             <option value="dark">dark</option>
           </select>
         </label>
+        <button id="btn-auth" hidden title="unlock this browser for private routes">🔒 log in</button>
       </div>
     </div>
   </header>
@@ -739,6 +772,20 @@ tr.stopped td { opacity: 0.55; }
   <footer class="card foot" id="foot"></footer>
 
 </div>
+
+<dialog id="auth-dialog">
+  <form id="auth-form" autocomplete="on">
+    <h2 class="card-title"><span class="squig">log in</span> <span aria-hidden="true">🔒</span></h2>
+    <p class="auth-hint">paste this instance's token (generate one with <code>openssl rand -hex 32</code>)</p>
+    <input type="password" id="token" name="token" autocomplete="current-password"
+           placeholder="token" required spellcheck="false">
+    <div class="auth-row">
+      <span class="auth-msg" id="auth-msg" role="alert"></span>
+      <button type="button" id="auth-cancel">cancel</button>
+      <button type="submit">log in</button>
+    </div>
+  </form>
+</dialog>
 
 <script>
 const REFRESH_MS = 1500;
@@ -1136,6 +1183,66 @@ modeSelect.addEventListener("change", () => {
   paintAppearance();
 });
 paintAppearance();
+
+// --- auth ---------------------------------------------------------------
+// The server tells us (once, publicly) whether auth is on; the login form
+// sends the token once as a Bearer header and the server replies with a
+// session cookie that rides along on every later fetch automatically.
+const btnAuth = document.getElementById("btn-auth");
+const authDialog = document.getElementById("auth-dialog");
+const authForm = document.getElementById("auth-form");
+const authMsg = document.getElementById("auth-msg");
+let authOK = false;
+
+function paintAuth() {
+  btnAuth.textContent = authOK ? "🔒 auth ok" : "🔒 log in";
+  btnAuth.classList.toggle("auth-ok", authOK);
+}
+
+async function checkCapabilities() {
+  try {
+    const res = await fetch("/api/capabilities", { cache: "no-store" });
+    if (!res.ok) return;
+    const caps = await res.json();
+    if (!caps.authRequired) return;
+    // A previous login may still be valid via the session cookie.
+    const chk = await fetch("/api/auth/check", { cache: "no-store" });
+    authOK = chk.ok;
+    btnAuth.hidden = false;
+    paintAuth();
+  } catch (e) {
+    // capabilities failing should never break the dashboard itself
+  }
+}
+
+btnAuth.addEventListener("click", () => {
+  authMsg.textContent = "";
+  authDialog.showModal();
+});
+document.getElementById("auth-cancel").addEventListener("click", () => authDialog.close());
+
+authForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  authMsg.textContent = "";
+  const token = document.getElementById("token").value;
+  try {
+    const res = await fetch("/api/auth/check", {
+      cache: "no-store",
+      headers: { Authorization: "Bearer " + token },
+    });
+    if (res.ok) {
+      authOK = true;
+      paintAuth();
+      authDialog.close();
+    } else {
+      authMsg.textContent = "wrong token — try again";
+    }
+  } catch (err) {
+    authMsg.textContent = "can't reach Pademelon: " + err.message;
+  }
+});
+
+checkCapabilities();
 
 tick();
 setInterval(tick, REFRESH_MS);

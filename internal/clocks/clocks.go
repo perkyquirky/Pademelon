@@ -39,6 +39,28 @@ const (
 // data, so refreshing faster than the poll just makes the UI feel live.
 const UIRefresh = 1500 * time.Millisecond
 
+// Auth bounds. The token is compared on every request; these shape the
+// browser-facing side of that. Deliberately not flags.
+const (
+	// SessionCookieMaxAge is how long the pademelon_session cookie stays
+	// valid in the browser. The cookie's value is the token itself, so
+	// rotating the token invalidates every issued cookie immediately — this
+	// constant only controls how often a human has to re-enter the token.
+	// It must outlive a typical browser session, or the "stay logged in"
+	// promise is a lie.
+	SessionCookieMaxAge = 30 * 24 * time.Hour
+
+	// AuthBackoffBase is the delay after the first failed token attempt.
+	// Backoff doubles per consecutive failure.
+	AuthBackoffBase = 500 * time.Millisecond
+
+	// AuthBackoffMax caps the failed-attempt delay. It must stay low enough
+	// that a legitimate user who fat-fingers the token a few times isn't
+	// locked out for minutes, and high enough that a brute-forcer gains
+	// nothing from hammering the endpoint.
+	AuthBackoffMax = 30 * time.Second
+)
+
 // BalloonStaleAfter is how old balloon stats may be before libvirtsrc stops
 // trusting them and falls back to "allocated". A live guest refreshes them
 // on every query, so anything much older means the virtio_balloon driver in

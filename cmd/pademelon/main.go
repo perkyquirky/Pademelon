@@ -37,6 +37,7 @@ func main() {
 		statsPeriod  = flag.Duration("stats-period", clocks.DefaultStatsPeriod, "how often QEMU refreshes guest balloon stats; 0s shows allocated RAM only")
 		concurrency  = flag.Int("concurrency", 8, "how many VMs to interrogate at once")
 		theme        = flag.String("theme", web.DefaultTheme, "default colour theme: "+strings.Join(web.Themes(), ", "))
+		authToken    = flag.String("auth-token", "", "token required by private routes (default: $PADAMELON_TOKEN or $PADAMELON_TOKEN_FILE)")
 		logLevel     = flag.String("log-level", "info", "debug, info, warn or error")
 		logFormat    = flag.String("log-format", "text", "text or json")
 		showVersion  = flag.Bool("version", false, "print version and exit")
@@ -58,6 +59,16 @@ func main() {
 	}
 	if !web.ValidTheme(*theme) {
 		fmt.Fprintf(os.Stderr, "pademelon: unknown theme %q, valid themes: %s\n", *theme, strings.Join(web.Themes(), ", "))
+		os.Exit(2)
+	}
+
+	// Token resolution: first present wins. The file form follows the Docker
+	// secrets convention so the value can stay out of compose files and out
+	// of `docker inspect`. Whitespace-only counts as unset-but-configured,
+	// which is a config error rather than a silent disable.
+	token, tokenSource, err := resolveToken(*authToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pademelon: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -87,6 +98,11 @@ func main() {
 		"agent_timeout_s", int64(*agentTimeout/time.Second),
 		"stats_period_s", int64(*statsPeriod/time.Second),
 	)
+	if token == "" {
+		log.Warn("auth disabled — the dashboard is open to anyone who can reach the listen address")
+	} else {
+		log.Info("auth enabled; private routes require the token", "token_from", tokenSource, "cookie_days", int64(clocks.SessionCookieMaxAge/(24*time.Hour)))
+	}
 
 	cache := model.NewCache()
 
@@ -106,7 +122,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           web.New(cache, log, *theme).Handler(),
+		Handler:           web.New(cache, log, *theme, token).Handler(),
 		ReadHeaderTimeout: clocks.HeaderReadTimeout,
 	}
 
@@ -184,6 +200,33 @@ func probe(listen string) int {
 		return 1
 	}
 	return 0
+}
+
+// resolveToken picks the auth token from the first place that has one:
+// the -auth-token flag, then $PADAMELON_TOKEN, then the file named by
+// $PADAMELON_TOKEN_FILE (the Docker-secrets convention). The returned source
+// name is for the startup log only; the value is never logged. An explicitly
+// configured but empty value is an error — a typo should not silently
+// disable auth.
+func resolveToken(flagValue string) (token, source string, err error) {
+	switch {
+	case flagValue != "":
+		token, source = flagValue, "flag"
+	case os.Getenv("PADAMELON_TOKEN") != "":
+		token, source = os.Getenv("PADAMELON_TOKEN"), "environment"
+	case os.Getenv("PADAMELON_TOKEN_FILE") != "":
+		path := os.Getenv("PADAMELON_TOKEN_FILE")
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", "", fmt.Errorf("reading PADAMELON_TOKEN_FILE: %w", err)
+		}
+		token, source = strings.TrimSpace(string(raw)), "file "+path
+	}
+	if strings.TrimSpace(token) == "" && (flagValue != "" ||
+		os.Getenv("PADAMELON_TOKEN") != "" || os.Getenv("PADAMELON_TOKEN_FILE") != "") {
+		return "", "", fmt.Errorf("auth token is configured but empty; generate one with: openssl rand -hex 32")
+	}
+	return token, source, nil
 }
 
 func newLogger(level, format string) (*slog.Logger, error) {

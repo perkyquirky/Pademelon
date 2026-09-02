@@ -1,8 +1,10 @@
 // Package web serves the dashboard.
 //
-// Every handler is a GET and reads from the cache. There are no write
-// endpoints, and no handler passes anything from a request through to
-// libvirt — domain names come from the poller, never from a query string.
+// The read tier is GET-only and anonymous: every read handler reads from the
+// cache, no handler passes anything from a request through to libvirt, and
+// domain names come from the poller, never from a query string. A private
+// tier (see auth.go) sits behind a static token; it is only registered when
+// a token is configured.
 package web
 
 import (
@@ -30,19 +32,27 @@ type Server struct {
 	cache *model.Cache
 	log   *slog.Logger
 	theme string
+	auth  authState
 }
 
 // New returns a Server reading from cache. theme is the default colour theme
 // sent to browsers that haven't picked one themselves; validate it with
-// ValidTheme before calling.
-func New(cache *model.Cache, log *slog.Logger, theme string) *Server {
+// ValidTheme before calling. An empty authToken disables auth entirely —
+// the private tier (currently /api/auth/check, later the action routes) is
+// not even registered without one.
+func New(cache *model.Cache, log *slog.Logger, theme, authToken string) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	if theme == "" {
 		theme = DefaultTheme
 	}
-	return &Server{cache: cache, log: log, theme: theme}
+	return &Server{
+		cache: cache,
+		log:   log,
+		theme: theme,
+		auth:  authState{token: authToken, failures: make(map[string]*authFailure)},
+	}
 }
 
 // Handler returns the routes.
@@ -51,6 +61,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /api/vms", s.handleVMs)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
+	mux.HandleFunc("GET /api/capabilities", s.handleCapabilities)
+	if s.auth.token != "" {
+		mux.Handle("GET /api/auth/check", s.requireToken(http.HandlerFunc(s.handleAuthCheck)))
+	}
 	return s.logRequests(mux)
 }
 

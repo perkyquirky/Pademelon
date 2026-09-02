@@ -30,6 +30,7 @@ Windows and Linux (tested Windows Server 2022 & Ubuntu Server 24.04.4 LTS)
 - Host OS - kernel (Linux) / OS build (Windows)
 - Drive partitions & usage
 - Colour themes — nine built in, pick one in the page header or set the server default with `-theme`
+- Optional token auth — see "Optional auth" below
 
 ## Currently unsupported:
 
@@ -51,4 +52,38 @@ The [Proxmox documentation](https://pve.proxmox.com/wiki/Qemu-guest-agent) has t
 There is a compose file in the root directory of this repository for you to copy.
 
 [Compose File](https://github.com/perkyquirky/Pademelon/blob/main/docker-compose.yaml)
+
+More example configurations, including auth: [Compose Examples](https://github.com/perkyquirky/Pademelon/blob/main/docker-compose-examples.yaml)
+
+## Optional auth
+
+By default the dashboard is open to anyone who can reach it on the local network.
+Auth is currently not required, this is being implimented prior to the addition of commands that can modify VM's.
+You can use a password of your choosing or generate a random string with:
+
+```bash
+openssl rand -hex 32
+```
+
+Then pass that value to the container as the `PADAMELON_TOKEN` environment variable, or via a Docker secret file with `PADAMELON_TOKEN_FILE`. A "🔒 log in" button appears in the page header; enter the token once per browser and you stay logged in for 30 days.
+
+## Use via compose example: auth
+
+```yaml
+services:
+  pademelon:
+    image: ghcr.io/perkyquirky/pademelon:latest
+    container_name: pademelon
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    environment:
+      # Generate with: openssl rand -hex 32
+      - PADAMELON_TOKEN=change-me-to-your-generated-token
+    volumes:
+      - /run/truenas_libvirt:/run/truenas_libvirt
+    user: "0:0"
+```
+
+Prefer not to have the token in your compose file? Use the Docker-secrets convention instead: `PADAMELON_TOKEN_FILE=/run/secrets/pademelon_token` with the secret mounted at that path.
 
