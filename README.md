@@ -18,6 +18,8 @@ Also they are adorable.
 
 ## Currently supported:
 
+Windows and Linux (tested Windows Server 2022 & Ubuntu Server 24.04.4 LTS)
+
 - VM power status
 - QEMU guest agent detection
 - Hostname
@@ -27,10 +29,6 @@ Also they are adorable.
 - IP address & interface ID
 - Host OS - kernel (Linux) / OS build (Windows)
 - Drive partitions & usage
-
-Linux and Windows guests both work. 
-
-One Windows caveat: memory usage shows allocated RAM only, because the Windows balloon driver doesn't report guest memory. 
 
 ## Currently unsupported:
 
