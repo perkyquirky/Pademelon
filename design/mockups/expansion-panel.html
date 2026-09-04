@@ -1,0 +1,1976 @@
+<!doctype html>
+<!-- UI reference mockup for the Pademelon expansion panel — the design the
+     phase 1-4 front-end work ports into the real page. Not embedded, not
+     served by the binary; open it in a browser. Data is fake and nothing
+     talks to libvirt. Field names deliberately mirror
+     internal/model/model.go so wiring the real thing later is easy. -->
+<html lang="en" data-theme="sweetpea" data-mode="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pademelon — mockup</title>
+<style>
+:root {
+  --pd-line: #4a3b5c;
+  --pd-body: #b9a0e0;
+  --pd-ear: #f2b7de;
+  --pd-muz: #fdf6ff;
+  --pd-eye: #2b2438;
+  --pd-nose: #e08cc4;
+  color-scheme: light;
+}
+:root[data-mode="dark"] {
+  --pd-line: #d9cdf2;
+  --pd-eye: #1d1430;
+  color-scheme: dark;
+}
+
+:root[data-theme=sweetpea] {
+  --bg: #f7f2fc;
+  --bg-pattern: repeating-linear-gradient(45deg, rgba(214, 196, 244, 0.28) 0 16px, transparent 16px 32px);
+  --card: #fffdff;
+  --card2: #fbf7ff;
+  --border-dot: #cdb4f2;
+  --border-soft: #e6d9f7;
+  --shadow: #dcc9f5;
+  --text: #463463;
+  --muted: #6f5f92;
+  --accent: #9a6ad8;
+  --accent-soft: #f1e7fd;
+  --ok-bg: #c9f2d3;
+  --ok-tx: #1d5c33;
+  --off-bg: #efeaf5;
+  --off-tx: #575070;
+  --warn-bg: #ffe9b8;
+  --warn-tx: #6d4a05;
+  --bad-bg: #ffd3e0;
+  --bad-tx: #a01a4d;
+  --track: #ece2f8;
+  --fill: linear-gradient(90deg, #b9a0e8, #f0a8d8);
+  --fill-warn: linear-gradient(90deg, #ffd59e, #ffaf87);
+  --fill-bad: linear-gradient(90deg, #ff9eb5, #f26d9d);
+}
+:root[data-theme=sweetpea][data-mode="dark"] {
+  --bg: #1e1631;
+  --bg-pattern: repeating-linear-gradient(45deg, rgba(122, 95, 190, 0.16) 0 16px, transparent 16px 32px);
+  --card: #2b2148;
+  --card2: #251c3e;
+  --border-dot: #7d68b3;
+  --border-soft: #453668;
+  --shadow: #141024;
+  --text: #f0eaff;
+  --muted: #b3a6d6;
+  --accent: #c39bf5;
+  --accent-soft: #43307a;
+  --ok-bg: #1f4630;
+  --ok-tx: #a8e8c0;
+  --off-bg: #3a3352;
+  --off-tx: #c3b9dd;
+  --warn-bg: #4a3814;
+  --warn-tx: #f2cf87;
+  --bad-bg: #512038;
+  --bad-tx: #f4a0bd;
+  --track: #3a2d5e;
+  --fill: linear-gradient(90deg, #b394ec, #eb9ed4);
+  --fill-warn: linear-gradient(90deg, #f2c077, #f0a05e);
+  --fill-bad: linear-gradient(90deg, #f287a8, #e56a92);
+}
+
+:root[data-theme=classic] {
+  --bg: #f6f7f9;
+  --bg-pattern: none;
+  --card: #ffffff;
+  --card2: #f1f3f5;
+  --border-dot: #dfe3e8;
+  --border-soft: #e5e7eb;
+  --shadow: #d9dde2;
+  --text: #1c2024;
+  --muted: #626a76;
+  --accent: #2563eb;
+  --accent-soft: #e5edfb;
+  --ok-bg: #d8f2e0;
+  --ok-tx: #166534;
+  --off-bg: #eceef1;
+  --off-tx: #4b5563;
+  --warn-bg: #fdeecb;
+  --warn-tx: #92400e;
+  --bad-bg: #fbdcdf;
+  --bad-tx: #b91c1c;
+  --track: #e5e7eb;
+  --fill: linear-gradient(90deg, #60a5fa, #2563eb);
+  --fill-warn: linear-gradient(90deg, #fbbf24, #d97706);
+  --fill-bad: linear-gradient(90deg, #f87171, #dc2626);
+}
+:root[data-theme=classic][data-mode="dark"] {
+  --bg: #14161a;
+  --bg-pattern: none;
+  --card: #1c1f24;
+  --card2: #23272e;
+  --border-dot: #3a3f47;
+  --border-soft: #2c3038;
+  --shadow: #0a0c0e;
+  --text: #e6e8eb;
+  --muted: #9aa2ae;
+  --accent: #60a5fa;
+  --accent-soft: #22314a;
+  --ok-bg: #1d3a27;
+  --ok-tx: #7ee2a1;
+  --off-bg: #2b313a;
+  --off-tx: #a8b0bb;
+  --warn-bg: #423312;
+  --warn-tx: #f5c86a;
+  --bad-bg: #45201f;
+  --bad-tx: #f5988f;
+  --track: #2c3038;
+  --fill: linear-gradient(90deg, #60a5fa, #3b82f6);
+  --fill-warn: linear-gradient(90deg, #fbbf24, #f59e0b);
+  --fill-bad: linear-gradient(90deg, #f87171, #ef4444);
+}
+
+:root[data-theme=charm] {
+  --bg: #fffdf5;
+  --bg-pattern: repeating-linear-gradient(-45deg, rgba(255, 123, 245, 0.10) 0 14px, transparent 14px 28px);
+  --card: #fffffe;
+  --card2: #fffaf0;
+  --border-dot: #f3b8e3;
+  --border-soft: #f7dcef;
+  --shadow: #efd8ea;
+  --text: #33265b;
+  --muted: #6f6494;
+  --accent: #6b50ff;
+  --accent-soft: #efecff;
+  --ok-bg: #d2f9ec;
+  --ok-tx: #0b5e46;
+  --off-bg: #f0ebe0;
+  --off-tx: #5f5647;
+  --warn-bg: #ffedbb;
+  --warn-tx: #7a4c06;
+  --bad-bg: #ffd9ec;
+  --bad-tx: #a31576;
+  --track: #f4ecdb;
+  --fill: linear-gradient(90deg, #6b50ff, #ff7bf5);
+  --fill-warn: linear-gradient(90deg, #ffd66b, #ff9d2e);
+  --fill-bad: linear-gradient(90deg, #ff7bf5, #ff4f9e);
+}
+:root[data-theme=charm][data-mode="dark"] {
+  --bg: #1c1240;
+  --bg-pattern: repeating-linear-gradient(-45deg, rgba(255, 123, 245, 0.07) 0 14px, transparent 14px 28px);
+  --card: #291c56;
+  --card2: #221647;
+  --border-dot: #7a5cff;
+  --border-soft: #43337e;
+  --shadow: #120a2b;
+  --text: #fffdf5;
+  --muted: #c4b8ee;
+  --accent: #ff7bf5;
+  --accent-soft: #45327f;
+  --ok-bg: #0f4636;
+  --ok-tx: #5af0c0;
+  --off-bg: #3b2f66;
+  --off-tx: #cdc2ef;
+  --warn-bg: #4d3a0f;
+  --warn-tx: #ffd66b;
+  --bad-bg: #571a4a;
+  --bad-tx: #ff9ade;
+  --track: #3a2c6e;
+  --fill: linear-gradient(90deg, #6b50ff, #ff7bf5);
+  --fill-warn: linear-gradient(90deg, #ffd66b, #ff9d2e);
+  --fill-bad: linear-gradient(90deg, #ff7bf5, #ff4f9e);
+}
+
+:root[data-theme=catppuccin-latte] {
+  --bg: #eff1f5;
+  --bg-pattern: none;
+  --card: #ffffff;
+  --card2: #e6e9ef;
+  --border-dot: #bcc0cc;
+  --border-soft: #ccd0da;
+  --shadow: #d8dce4;
+  --text: #4c4f69;
+  --muted: #5c5f77;
+  --accent: #8839ef;
+  --accent-soft: #ece4fa;
+  --ok-bg: #dbf1d3;
+  --ok-tx: #2f6e21;
+  --off-bg: #e3e5ec;
+  --off-tx: #5d6372;
+  --warn-bg: #f6e7c1;
+  --warn-tx: #7a520b;
+  --bad-bg: #f8d8dd;
+  --bad-tx: #b41531;
+  --track: #dce0e8;
+  --fill: linear-gradient(90deg, #8839ef, #ea76cb);
+  --fill-warn: linear-gradient(90deg, #df8e1d, #fe640b);
+  --fill-bad: linear-gradient(90deg, #d20f39, #e64553);
+}
+
+:root[data-theme=catppuccin-frappe] {
+  --bg: #303446;
+  --bg-pattern: none;
+  --card: #292c3c;
+  --card2: #232634;
+  --border-dot: #626880;
+  --border-soft: #414559;
+  --shadow: #1a1d2b;
+  --text: #c6d3f5;
+  --muted: #a5adce;
+  --accent: #ca9ee6;
+  --accent-soft: #4a4364;
+  --ok-bg: #424d4b;
+  --ok-tx: #a6d189;
+  --off-bg: #414559;
+  --off-tx: #b5bfe2;
+  --warn-bg: #4f4b4d;
+  --warn-tx: #e5c890;
+  --bad-bg: #4f3d51;
+  --bad-tx: #f2a5a7;
+  --track: #414559;
+  --fill: linear-gradient(90deg, #ca9ee6, #f4b8e4);
+  --fill-warn: linear-gradient(90deg, #e5c890, #ef9f76);
+  --fill-bad: linear-gradient(90deg, #e78284, #ea999c);
+}
+
+:root[data-theme=catppuccin-macchiato] {
+  --bg: #24273a;
+  --bg-pattern: none;
+  --card: #1e2030;
+  --card2: #181926;
+  --border-dot: #5b6078;
+  --border-soft: #363a4f;
+  --shadow: #10121d;
+  --text: #cad3f5;
+  --muted: #a5adcb;
+  --accent: #c6a0f6;
+  --accent-soft: #403a58;
+  --ok-bg: #394544;
+  --ok-tx: #a6da95;
+  --off-bg: #363a4f;
+  --off-tx: #b8c0e8;
+  --warn-bg: #484446;
+  --warn-tx: #eed49f;
+  --bad-bg: #473544;
+  --bad-tx: #ed8796;
+  --track: #363a4f;
+  --fill: linear-gradient(90deg, #c6a0f6, #f5bde6);
+  --fill-warn: linear-gradient(90deg, #eed49f, #f5a97f);
+  --fill-bad: linear-gradient(90deg, #ed8796, #ee99a0);
+}
+
+:root[data-theme=catppuccin-mocha] {
+  --bg: #1e1e2e;
+  --bg-pattern: none;
+  --card: #181825;
+  --card2: #11111b;
+  --border-dot: #585b70;
+  --border-soft: #313244;
+  --shadow: #0b0b12;
+  --text: #cdd6f4;
+  --muted: #a6adc8;
+  --accent: #cba6f7;
+  --accent-soft: #3c344f;
+  --ok-bg: #34403e;
+  --ok-tx: #a6e3a1;
+  --off-bg: #313244;
+  --off-tx: #bac2de;
+  --warn-bg: #454041;
+  --warn-tx: #f9e2af;
+  --bad-bg: #442f3f;
+  --bad-tx: #f38ba8;
+  --track: #313244;
+  --fill: linear-gradient(90deg, #cba6f7, #f5c2e7);
+  --fill-warn: linear-gradient(90deg, #f9e2af, #fab387);
+  --fill-bad: linear-gradient(90deg, #f38ba8, #f5a2b6);
+}
+
+:root[data-theme=dracula] {
+  --bg: #191a21;
+  --bg-pattern: none;
+  --card: #21222c;
+  --card2: #282a36;
+  --border-dot: #6272a4;
+  --border-soft: #44475a;
+  --shadow: #0f1015;
+  --text: #f8f8f2;
+  --muted: #9ba5c9;
+  --accent: #bd93f9;
+  --accent-soft: #483f5f;
+  --ok-bg: #2a4d3c;
+  --ok-tx: #50fa7b;
+  --off-bg: #44475a;
+  --off-tx: #d6daee;
+  --warn-bg: #4a4d3f;
+  --warn-tx: #f1fa8c;
+  --bad-bg: #4d2c34;
+  --bad-tx: #ff7d7d;
+  --track: #44475a;
+  --fill: linear-gradient(90deg, #bd93f9, #ff79c6);
+  --fill-warn: linear-gradient(90deg, #f1fa8c, #ffb86c);
+  --fill-bad: linear-gradient(90deg, #ff5555, #ff9db0);
+}
+
+:root[data-theme=noctis] {
+  --bg: #fef8ec;
+  --bg-pattern: none;
+  --card: #fffdf6;
+  --card2: #f9f1e1;
+  --border-dot: #e5c9a8;
+  --border-soft: #efe2c8;
+  --shadow: #e7dbc2;
+  --text: #005661;
+  --muted: #4f6d70;
+  --accent: #e64100;
+  --accent-soft: #f9e8dd;
+  --ok-bg: #d4f0dd;
+  --ok-tx: #006a3e;
+  --off-bg: #eee9da;
+  --off-tx: #6b6455;
+  --warn-bg: #f9ecd0;
+  --warn-tx: #8a6400;
+  --bad-bg: #fadde3;
+  --bad-tx: #b02554;
+  --track: #efe2c8;
+  --fill: linear-gradient(90deg, #5842ff, #ff5792);
+  --fill-warn: linear-gradient(90deg, #fa8900, #ffb85c);
+  --fill-bad: linear-gradient(90deg, #ff530f, #ff7d8f);
+}
+:root[data-theme=noctis][data-mode="dark"] {
+  --bg: #041d20;
+  --bg-pattern: none;
+  --card: #052529;
+  --card2: #062d31;
+  --border-dot: #2f5b60;
+  --border-soft: #17383c;
+  --shadow: #01100f;
+  --text: #b2cacd;
+  --muted: #86a3a9;
+  --accent: #49e9a6;
+  --accent-soft: #0b3a37;
+  --ok-bg: #0c3b2f;
+  --ok-tx: #49e9a6;
+  --off-bg: #17383c;
+  --off-tx: #8fa8ad;
+  --warn-bg: #43331a;
+  --warn-tx: #e4b781;
+  --bad-bg: #46232f;
+  --bad-tx: #df769b;
+  --track: #17383c;
+  --fill: linear-gradient(90deg, #7060eb, #df769b);
+  --fill-warn: linear-gradient(90deg, #e4b781, #e66533);
+  --fill-bad: linear-gradient(90deg, #e3541c, #df769b);
+}
+
+/* ---- base styles (mirrors the real page) ---- */
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { scrollbar-gutter: stable; min-height: 100%; }
+body {
+  margin: 0;
+  padding: 24px;
+  background-color: var(--bg);
+  background-image: var(--bg-pattern, none);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+h1, h2, h3, .badge, button, select, .status {
+  font-family: ui-rounded, "SF Pro Rounded", "Hiragino Maru Gothic ProN", "Trebuchet MS", system-ui, sans-serif;
+}
+.wrap {
+  max-width: 1180px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.card {
+  background: var(--card);
+  border: 2px dotted var(--border-dot);
+  border-radius: 20px;
+  box-shadow: 0 5px 0 var(--shadow);
+  padding: 18px 20px;
+}
+.card-title {
+  margin: 0 0 14px;
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+}
+.card-title .squig {
+  border-bottom: 3px dotted var(--border-dot);
+}
+
+.masthead {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.masthead h1 {
+  margin: 0;
+  font-size: 32px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  border-bottom: 4px dotted var(--pd-ear);
+}
+.tagline { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+.masthead-right {
+  margin-left: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+.status {
+  color: var(--muted);
+  font-size: 12.5px;
+  background: var(--card2);
+  border: 2px dotted var(--border-soft);
+  border-radius: 999px;
+  padding: 4px 12px;
+  max-width: 480px;
+  word-break: break-word;
+}
+.status.bad {
+  color: var(--bad-tx);
+  background: var(--bad-bg);
+  border-color: var(--bad-bg);
+  font-weight: 700;
+}
+.status.toast {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent-soft);
+  font-weight: 700;
+}
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ctl {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+button {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--card2);
+  border: 2px dotted var(--border-dot);
+  border-radius: 999px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+button:hover { background: var(--accent-soft); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:disabled:hover { background: var(--card2); }
+
+/* Solid borders for the clickable pills. CSS `dotted` renders unevenly
+   around a full-pill curve, and mixing solid and dotted pills in one row
+   made it obvious. Panels and the table keep the dotted handmade look. */
+.controls button,
+.controls select,
+.panel-actions button {
+  border: 2px solid var(--border-dot);
+}
+.controls button:hover,
+.panel-actions button:hover { border-color: var(--accent); }
+select {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text);
+  background: var(--card2);
+  border: 2px dotted var(--border-dot);
+  border-radius: 999px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+select:disabled { opacity: 0.55; cursor: not-allowed; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+.table-scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; min-width: 900px; }
+th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 800;
+  padding: 8px 12px;
+  border-bottom: 2px dotted var(--border-dot);
+  white-space: nowrap;
+}
+td {
+  padding: 12px;
+  border-bottom: 1px dashed var(--border-soft);
+  vertical-align: top;
+}
+tr:last-child td { border-bottom: none; }
+tbody tr:not(.detail):hover td { background: var(--card2); }
+tr.stopped td { opacity: 0.55; }
+
+.name { font-weight: 700; }
+.sub { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+
+.badge {
+  display: inline-block;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 800;
+  white-space: nowrap;
+  box-shadow: 0 2px 0 var(--shadow);
+}
+.badge.running { background: var(--ok-bg); color: var(--ok-tx); }
+.badge.stopped { background: var(--off-bg); color: var(--off-tx); }
+.badge.other   { background: var(--warn-bg); color: var(--warn-tx); }
+.badge.err     { background: var(--bad-bg); color: var(--bad-tx); }
+
+.meter { min-width: 120px; }
+.bar {
+  height: 12px;
+  background: var(--track);
+  border-radius: 999px;
+  box-shadow: inset 0 2px 3px rgba(0, 0, 0, 0.12);
+  overflow: hidden;
+  margin-top: 4px;
+}
+.bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--fill);
+}
+.bar > span.warn { background: var(--fill-warn); }
+.bar > span.bad  { background: var(--fill-bad); }
+.val { font-variant-numeric: tabular-nums; font-size: 12.5px; }
+
+.fs { margin-bottom: 8px; }
+.fs:last-child { margin-bottom: 0; }
+.dash { color: var(--muted); }
+
+.foot {
+  text-align: center;
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 12px 20px;
+}
+.pdm { image-rendering: pixelated; vertical-align: middle; }
+.logo-pdm { flex: none; }
+
+dialog {
+  border: 2px dotted var(--border-dot);
+  border-radius: 20px;
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 5px 0 var(--shadow);
+  padding: 18px 20px;
+  max-width: 340px;
+  width: calc(100vw - 48px);
+}
+#snap-dialog { max-width: 400px; }
+#ssh-dialog { max-width: 480px; }
+dialog::backdrop { background: rgba(0, 0, 0, 0.45); }
+dialog .card-title { margin-bottom: 4px; }
+
+/* ---- mockup additions: the expansion panel ---- */
+.tag-mock {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 10px;
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--muted);
+  border: 2px dotted var(--border-dot);
+  border-radius: 999px;
+  padding: 2px 10px;
+}
+td.vmcell { cursor: pointer; }
+.chev {
+  display: inline-block;
+  width: 1em;
+  font-size: 11px;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+tr.open .chev { transform: rotate(90deg); }
+tr.detail > td { padding: 8px 12px 14px 30px; }
+.panel {
+  border: 2px dotted var(--border-dot);
+  border-radius: 16px;
+  background: var(--card);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.panel-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.menu-wrap { position: relative; display: inline-block; }
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  min-width: 180px;
+  background: var(--card);
+  border: 2px solid var(--border-dot);
+  border-radius: 14px;
+  box-shadow: 0 5px 0 var(--shadow);
+  padding: 6px;
+}
+.menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  border-radius: 9px;
+  padding: 7px 12px;
+  font-size: 12.5px;
+}
+.menu button:hover { background: var(--accent-soft); }
+.menu button:disabled { opacity: 0.4; cursor: not-allowed; }
+.menu button:disabled:hover { background: none; }
+.menu button.danger { color: var(--bad-tx); font-weight: 700; }
+
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 780px) { .grid2 { grid-template-columns: 1fr; } }
+.mini {
+  border: 2px dashed var(--border-soft);
+  border-radius: 14px;
+  background: var(--card2);
+  padding: 10px 14px 8px;
+  min-width: 0;
+}
+.mini h3 {
+  display: inline-block;
+  margin: 0 0 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  border-bottom: 2px dotted var(--border-dot);
+  padding-bottom: 2px;
+}
+.dev { margin-bottom: 8px; }
+.dev:last-child { margin-bottom: 0; }
+.dev-name { font-weight: 700; font-size: 12.5px; }
+.dev-name .sub { margin-left: 6px; }
+.statline {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.statline .num {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+}
+.snap-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 2px;
+  border-bottom: 1px dashed var(--border-soft);
+  font-size: 13px;
+}
+.snap-row:last-child { border-bottom: none; }
+.snap-name { font-weight: 700; }
+.snap-age { color: var(--muted); font-size: 12px; }
+.snap-row span.filler { flex: 1; }
+.pill-sm {
+  font-size: 11.5px;
+  padding: 3px 10px;
+  border: 2px solid var(--border-soft);
+}
+.pill-sm:hover { border-color: var(--accent); }
+.note { color: var(--muted); font-size: 12.5px; }
+
+/* restore menus live at the row's right edge, so open them leftwards */
+.snap-row .menu { left: auto; right: 0; }
+
+/* automated rollback stage dialog */
+#stage-dialog { max-width: 460px; }
+.stage {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 2px;
+  border-bottom: 1px dashed var(--border-soft);
+  font-size: 13px;
+}
+.stage:last-child { border-bottom: none; }
+.stage .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: none;
+  background: var(--track);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+.stage .st-label { font-weight: 700; }
+.stage .st-note { color: var(--muted); font-size: 12px; margin-left: auto; text-align: right; }
+.stage.done .dot { background: var(--ok-tx); }
+.stage.skip .dot { background: var(--border-dot); }
+.stage.failed .dot { background: var(--bad-tx); }
+@keyframes pulse { 50% { opacity: 0.35; } }
+.stage.active .dot { background: var(--accent); animation: pulse 1s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .stage.active .dot { animation: none; }
+}
+.chk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--muted);
+  margin: 10px 0 6px;
+  cursor: pointer;
+}
+.chk input { accent-color: var(--accent); width: 15px; height: 15px; }
+
+/* raw xml viewer */
+.xmlpre {
+  max-height: 50vh;
+  overflow: auto;
+  margin: 0;
+  background: var(--card2);
+  border: 2px dashed var(--border-soft);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.dlg-hint { color: var(--muted); font-size: 12.5px; margin: 0 0 6px; }
+.dlg-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  margin: 10px 0 4px;
+}
+.dlg-label-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 10px 0 4px;
+}
+.dlg-label-row .dlg-label { margin: 0; }
+.dlg-msg { color: var(--bad-tx); font-size: 12px; font-weight: 700; margin-right: auto; }
+.dlg-msg.ok { color: var(--ok-tx); }
+.dlg-input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  color: var(--text);
+  background: var(--card2);
+  border: 2px dotted var(--border-dot);
+  border-radius: 12px;
+  padding: 8px 12px;
+}
+.dlg-input:focus { border-style: solid; outline: none; }
+textarea.dlg-input {
+  min-height: 88px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.dlg-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.keyline {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--border-soft);
+  word-break: break-all;
+}
+.keyline:last-child { border-bottom: none; }
+.btn-danger {
+  background: var(--bad-bg);
+  color: var(--bad-tx);
+  border-color: var(--bad-bg);
+}
+.btn-warn {
+  background: var(--warn-bg);
+  color: var(--warn-tx);
+  border-color: var(--warn-bg);
+}
+</style>
+<script>
+(function () {
+  "use strict";
+  var THEMES = {
+    "sweetpea": ["light", "dark"],
+    "classic": ["light", "dark"],
+    "charm": ["light", "dark"],
+    "catppuccin-latte": ["light"],
+    "catppuccin-frappe": ["dark"],
+    "catppuccin-macchiato": ["dark"],
+    "catppuccin-mocha": ["dark"],
+    "dracula": ["dark"],
+    "noctis": ["light", "dark"]
+  };
+  var root = document.documentElement;
+  var theme = root.getAttribute("data-theme");
+  if (!THEMES[theme]) theme = "sweetpea";
+  var mode = "auto";
+  var media = window.matchMedia("(prefers-color-scheme: dark)");
+  try {
+    var savedTheme = localStorage.getItem("pademelon.theme");
+    if (savedTheme && THEMES[savedTheme]) theme = savedTheme;
+    var savedMode = localStorage.getItem("pademelon.mode");
+    if (savedMode === "auto" || savedMode === "light" || savedMode === "dark") mode = savedMode;
+  } catch (e) {}
+  function resolve() {
+    var variants = THEMES[theme];
+    if (variants.length === 1) return variants[0];
+    var wantsDark = mode === "dark" || (mode === "auto" && media.matches);
+    return wantsDark ? "dark" : "light";
+  }
+  function apply() {
+    root.setAttribute("data-theme", theme);
+    root.setAttribute("data-mode", resolve());
+  }
+  media.addEventListener("change", function () {
+    if (mode === "auto") apply();
+  });
+  apply();
+  window.__pdTheme = {
+    themes: THEMES,
+    get theme() { return theme; },
+    get mode() { return mode; },
+    setTheme: function (t) {
+      if (!THEMES[t]) return;
+      theme = t;
+      try { localStorage.setItem("pademelon.theme", t); } catch (e) {}
+      apply();
+    },
+    setMode: function (m) {
+      if (m !== "auto" && m !== "light" && m !== "dark") return;
+      mode = m;
+      try { localStorage.setItem("pademelon.mode", m); } catch (e) {}
+      apply();
+    }
+  };
+})();
+</script>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="card masthead">
+    <span class="logo-pdm" id="logo-pdm" aria-hidden="true"></span>
+    <div>
+      <h1>pademelon<span class="tag-mock">mockup</span></h1>
+      <p class="tagline">a soft little window into your NAS ✿</p>
+    </div>
+    <div class="masthead-right">
+      <span class="status" id="status"></span>
+      <div class="controls" role="group" aria-label="Actions and appearance">
+        <button id="btn-shutdown-all" title="ask every running VM with an agent to shut down, a second apart">shut down all…</button>
+        <label class="ctl">theme
+          <select id="theme-select" aria-label="Colour theme">
+            <optgroup label="pademelon">
+              <option value="sweetpea">sweetpea</option>
+              <option value="classic">classic</option>
+              <option value="charm">charm</option>
+            </optgroup>
+            <optgroup label="catppuccin">
+              <option value="catppuccin-latte">latte</option>
+              <option value="catppuccin-frappe">frappé</option>
+              <option value="catppuccin-macchiato">macchiato</option>
+              <option value="catppuccin-mocha">mocha</option>
+            </optgroup>
+            <optgroup label="more">
+              <option value="dracula">dracula</option>
+              <option value="noctis">noctis</option>
+            </optgroup>
+          </select>
+        </label>
+        <label class="ctl">mode
+          <select id="mode-select" aria-label="Light or dark mode">
+            <option value="auto">auto</option>
+            <option value="light">light</option>
+            <option value="dark">dark</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2 class="card-title"><span class="squig">vm garden</span> <span aria-hidden="true">🌷</span></h2>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>VM</th>
+              <th>State</th>
+              <th>CPU</th>
+              <th>Memory</th>
+              <th>Addresses</th>
+              <th>OS</th>
+              <th>Storage</th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+      <p class="note" style="margin:14px 0 0">click a VM name to open its pouch — power, drives, network, snapshots, ssh keys, raw xml.</p>
+    </section>
+  </main>
+
+  <footer class="card foot">static mockup — nothing here talks to libvirt · (˶ˆᗜˆ˵)</footer>
+
+</div>
+
+<dialog id="confirm-dialog">
+  <h2 class="card-title" id="cf-title"></h2>
+  <p class="dlg-hint" id="cf-desc"></p>
+  <div class="dlg-row">
+    <button type="button" id="cf-cancel">cancel</button>
+    <button type="button" id="cf-ok"></button>
+  </div>
+</dialog>
+
+<dialog id="snap-dialog">
+  <h2 class="card-title">new snapshot → <span id="snap-vm"></span></h2>
+  <p class="dlg-hint">the VM is frozen for a moment while its zvols are snapshotted, then thawed. the whole dance is usually a fraction of a second.</p>
+  <label class="dlg-label" for="snap-name">name</label>
+  <input class="dlg-input" id="snap-name" placeholder="pre-upgrade" spellcheck="false" autocomplete="off">
+  <div class="dlg-row">
+    <span class="dlg-msg" id="snap-msg" role="alert"></span>
+    <button type="button" id="snap-cancel">cancel</button>
+    <button type="button" id="snap-create">create</button>
+  </div>
+</dialog>
+
+<dialog id="ssh-dialog">
+  <h2 class="card-title">ssh keys → <span id="ssh-vm"></span></h2>
+  <p class="dlg-hint">keys are appended to the user's authorized_keys via the qemu guest agent — no commands are run in the guest.</p>
+  <label class="dlg-label" for="ssh-user">username</label>
+  <input class="dlg-input" id="ssh-user" placeholder="root" spellcheck="false" autocapitalize="off" autocomplete="off">
+  <div class="dlg-label">existing keys</div>
+  <div id="ssh-existing"></div>
+  <div class="dlg-label-row">
+    <label class="dlg-label" for="ssh-new">add — one key per line</label>
+    <button type="button" class="pill-sm" id="ssh-file">load from file…</button>
+    <input type="file" id="ssh-file-input" multiple hidden>
+  </div>
+  <textarea class="dlg-input" id="ssh-new" placeholder="ssh-ed25519 AAAA… comment" spellcheck="false"></textarea>
+  <div class="dlg-row">
+    <span class="dlg-msg" id="ssh-msg" role="alert"></span>
+    <button type="button" id="ssh-cancel">cancel</button>
+    <button type="button" id="ssh-add">add keys</button>
+  </div>
+</dialog>
+
+<dialog id="stage-dialog">
+  <h2 class="card-title">automated rollback → <span id="stage-vm"></span></h2>
+  <p class="dlg-hint">the VM is stopped, its zvols roll back to the snapshot you pick, then it starts again.</p>
+  <label class="dlg-label" for="stage-target">roll back to</label>
+  <select class="dlg-input" id="stage-target"></select>
+  <label class="chk"><input type="checkbox" id="stage-start" checked> start the VM when the rollback is done</label>
+  <div id="stage-list"></div>
+  <div class="dlg-row">
+    <button type="button" id="stage-cancel">cancel</button>
+    <button type="button" id="stage-begin">begin rollback</button>
+    <button type="button" id="stage-close" hidden>close</button>
+  </div>
+</dialog>
+
+<dialog id="xml-dialog">
+  <h2 class="card-title">raw xml → <span id="xml-vm"></span></h2>
+  <p class="dlg-hint">exactly what libvirt holds for this domain — read-only, served from the last poll.</p>
+  <pre class="xmlpre" id="xml-pre"></pre>
+  <div class="dlg-row">
+    <button type="button" id="xml-copy">copy</button>
+    <span style="flex:1"></span>
+    <button type="button" id="xml-close">close</button>
+  </div>
+</dialog>
+
+<script>
+"use strict";
+
+// --- shared helpers (copied from the real page) --------------------------
+
+const PDM_MAP = [
+  "..oo....oo..",
+  ".obeo..oebo.",
+  ".obeo..oebo.",
+  ".obboooobbo.",
+  ".obbbbbbbbo.",
+  ".obbbbbbbbo.",
+  ".obybbbbybo.",
+  ".obbbnnbbbo.",
+  ".obllllllbo.",
+  ".obbllllbbo.",
+  "..obbbbbbo..",
+  "...oooooo..."
+];
+const PDM_PAL = {
+  o: "var(--pd-line)",
+  b: "var(--pd-body)",
+  e: "var(--pd-ear)",
+  l: "var(--pd-muz)",
+  y: "var(--pd-eye)",
+  n: "var(--pd-nose)"
+};
+
+function pdmSVG(px) {
+  const w = PDM_MAP[0].length;
+  const h = PDM_MAP.length;
+  let r = "";
+  PDM_MAP.forEach((row, y) => {
+    [...row].forEach((c, x) => {
+      if (PDM_PAL[c]) r += `<rect x="${x}" y="${y}" width="1.03" height="1.03" fill="${PDM_PAL[c]}"/>`;
+    });
+  });
+  return `<svg class="pdm" width="${w * px}" height="${h * px}" viewBox="0 0 ${w} ${h}" shape-rendering="crispEdges" role="img" aria-label="Pademelon mascot">${r}</svg>`;
+}
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => (
+    {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]
+  ));
+}
+
+function fmtBytes(n) {
+  if (!n) return "0 B";
+  const u = ["B","KiB","MiB","GiB","TiB"];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(n < 10 && i > 0 ? 1 : 0) + " " + u[i];
+}
+
+function fmtKiB(kib) { return fmtBytes(kib * 1024); }
+
+function level(pct) { return pct >= 90 ? "bad" : pct >= 75 ? "warn" : ""; }
+
+function meter(pct, label) {
+  const p = Math.max(0, Math.min(100, pct));
+  return `<div class="meter">
+    <div class="val">${esc(label)}</div>
+    <div class="bar"><span class="${level(p)}" style="width:${p.toFixed(1)}%"></span></div>
+  </div>`;
+}
+
+function stateBadge(vm) {
+  const cls = vm.running ? "running" : vm.state === "stopped" ? "stopped"
+            : vm.state === "crashed" ? "err" : "other";
+  return `<span class="badge ${cls}">${esc(vm.state)}</span>`;
+}
+
+function agentNote(vm) {
+  if (vm.running && vm.agent === "disconnected")
+    return `<div class="sub" title="Install the QEMU guest agent in this VM (qemu-guest-agent on Linux, virtio-win guest tools on Windows)">agent not installed</div>`;
+  if (vm.running && vm.agent === "error")
+    return `<div class="sub">agent not answering</div>`;
+  return "";
+}
+
+function addresses(vm) {
+  const real = (vm.interfaces || []).filter(i => !i.virtual);
+  const out = [];
+  for (const i of real) {
+    for (const ip of (i.ipv4 || [])) out.push(`${ip} <span class="sub">${esc(i.name)}</span>`);
+  }
+  if (!out.length) return `<span class="dash">—</span>`;
+  return `<div class="mono">${out.join("<br>")}</div>`;
+}
+
+function storage(vm) {
+  const fs = vm.filesystems || [];
+  if (!fs.length) return `<span class="dash">—</span>`;
+  return fs.map(f => {
+    const pct = f.totalBytes ? (f.usedBytes / f.totalBytes * 100) : 0;
+    const label = `${esc(f.mountpoint)} · ${fmtBytes(f.usedBytes)} / ${fmtBytes(f.totalBytes)}`;
+    return `<div class="fs">${meter(pct, label)}</div>`;
+  }).join("");
+}
+
+function osHtml(vm) {
+  return vm.os
+    ? `<div>${esc(vm.os)}</div>` + (vm.kernel ? `<div class="sub mono">${esc(vm.kernel)}</div>` : "")
+    : `<span class="dash">—</span>`;
+}
+
+// --- fake data -----------------------------------------------------------
+// Field names inside `interfaces`/`filesystems`/`memTotalKiB`/... match
+// internal/model/model.go's JSON. `disks`, `nics` and `snapshots` are the
+// proposed additions from the plan.
+
+const GiB = 1024 * 1024 * 1024;
+
+const VMS = [
+  {
+    domain: "7_web-01", name: "web-01", uuid: "7b1e9c42-3a5d-4e8f-9b0c-2d6f8a1e4c7b", vcpus: 4,
+    state: "running", running: true,
+    agent: "ok", hostname: "web-01",
+    os: "Ubuntu 24.04.2 LTS", kernel: "6.8.0-51-generic",
+    memTotalKiB: 4 * 1024 * 1024, memUsedKiB: 2202009, memKnown: true,
+    cpuPercent: 12.4, cpuKnown: true,
+    interfaces: [{ name: "eth0", mac: "52:54:00:aa:bb:cc", ipv4: ["192.168.1.50"], virtual: false }],
+    filesystems: [
+      { mountpoint: "/", type: "ext4", usedBytes: 10.1 * GiB, totalBytes: 38.7 * GiB },
+      { mountpoint: "/srv", type: "ext4", usedBytes: 23.6 * GiB, totalBytes: 38.7 * GiB }
+    ],
+    snapshots: [
+      { name: "pre-docker", at: "2 hours ago" },
+      { name: "clean-install", at: "3 days ago" }
+    ],
+    sshKeys: ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyHash paige@old-laptop"],
+    disks: [
+      { dev: "vda", source: "/dev/zvol/tank/vms/web-01/disk0", format: "raw · zvol", capacity: 40 * GiB,
+        rdBps: 2516582, wrBps: 911360, errors: 0 },
+      { dev: "vdb", source: "/dev/zvol/tank/vms/web-01/disk1", format: "raw · zvol", capacity: 8 * GiB,
+        rdBps: 143360, wrBps: 286720, errors: 0 }
+    ],
+    nics: [
+      { device: "tap7", guest: "eth0", mac: "52:54:00:aa:bb:cc",
+        rxBps: 1258291, txBps: 348160, errors: 0, drops: 0 }
+    ]
+  },
+  {
+    domain: "12_database", name: "database", uuid: "3e6a8d51-9c2b-4f7a-b1e3-5d8c0f2a6b9e", vcpus: 8,
+    state: "running", running: true,
+    agent: "ok", hostname: "db-primary",
+    os: "Debian GNU/Linux 12", kernel: "6.1.0-18-amd64",
+    memTotalKiB: 8 * 1024 * 1024, memUsedKiB: 5872025, memKnown: true,
+    cpuPercent: 34.7, cpuKnown: true,
+    interfaces: [{ name: "eth0", mac: "52:54:00:11:22:33", ipv4: ["192.168.1.51"], virtual: false }],
+    filesystems: [{ mountpoint: "/", type: "ext4", usedBytes: 15.8 * GiB, totalBytes: 38.5 * GiB }],
+    snapshots: [
+      { name: "pre-upgrade", at: "1 day ago" },
+      { name: "nightly-auto", at: "9 hours ago" }
+    ],
+    sshKeys: [],
+    disks: [
+      { dev: "sda", source: "/dev/zvol/tank/vms/database/disk0", format: "raw · zvol", capacity: 64 * GiB,
+        rdBps: 4300000, wrBps: 1150000, errors: 0 },
+      { dev: "sdb", source: "/dev/zvol/tank/vms/database/disk1", format: "raw · zvol", capacity: 128 * GiB,
+        rdBps: 102400, wrBps: 204800, errors: 0 }
+    ],
+    nics: [
+      { device: "tap12", guest: "eth0", mac: "52:54:00:11:22:33",
+        rxBps: 225280, txBps: 40960, errors: 0, drops: 0 }
+    ]
+  },
+  {
+    // The agentless one: no OS, no IPs, no filesystems — but drive and
+    // network stats still work because they come from the host side.
+    domain: "3_win-box", name: "win-box", uuid: "9d4f2b7e-6a1c-4e3b-8f5d-1c7e9a3b2f6d", vcpus: 6,
+    state: "running", running: true,
+    agent: "disconnected", hostname: "",
+    os: "", kernel: "",
+    memTotalKiB: 16 * 1024 * 1024, memUsedKiB: 0, memKnown: false,
+    cpuPercent: 3.2, cpuKnown: true,
+    interfaces: [],
+    filesystems: [],
+    snapshots: [],
+    sshKeys: [],
+    disks: [
+      { dev: "sda", source: "/dev/zvol/tank/vms/win-box/disk0", format: "raw · zvol", capacity: 100 * GiB,
+        rdBps: 640000, wrBps: 210000, errors: 0 }
+    ],
+    nics: [
+      { device: "tap3", guest: "eth0", mac: "52:54:00:44:55:66",
+        rxBps: 51200, txBps: 20480, errors: 0, drops: 2 }
+    ]
+  },
+  {
+    // Paused, to demo the pause/resume menu state.
+    domain: "9_sandbox", name: "sandbox", uuid: "1a3d5f7b-9c2e-4b6d-8f1a-3c5e7b9d1f2a", vcpus: 2,
+    state: "paused", running: false,
+    agent: "ok", hostname: "sandbox",
+    os: "Fedora Linux 42", kernel: "6.14.0-63.fc42.x86_64",
+    memTotalKiB: 4 * 1024 * 1024, memUsedKiB: 1900000, memKnown: true,
+    cpuPercent: 0, cpuKnown: true,
+    interfaces: [{ name: "eth0", mac: "52:54:00:77:88:99", ipv4: ["192.168.1.52"], virtual: false }],
+    filesystems: [{ mountpoint: "/", type: "btrfs", usedBytes: 6.2 * GiB, totalBytes: 20 * GiB }],
+    snapshots: [{ name: "fresh-install", at: "5 days ago" }],
+    sshKeys: [],
+    disks: [
+      { dev: "vda", source: "/dev/zvol/tank/vms/sandbox/disk0", format: "raw · zvol", capacity: 20 * GiB,
+        rdBps: 118, wrBps: 42, errors: 0 }
+    ],
+    nics: [
+      { device: "tap9", guest: "eth0", mac: "52:54:00:77:88:99",
+        rxBps: 0, txBps: 0, errors: 0, drops: 0 }
+    ]
+  },
+  {
+    domain: "15_backup", name: "backup", uuid: "5c8e1a3f-2b6d-4c9e-a7f1-8d3b0e5c2a4f", vcpus: 2,
+    state: "stopped", running: false,
+    agent: "absent", hostname: "",
+    os: "", kernel: "",
+    memTotalKiB: 4 * 1024 * 1024, memUsedKiB: 0, memKnown: false,
+    cpuPercent: 0, cpuKnown: false,
+    interfaces: [],
+    filesystems: [],
+    snapshots: [{ name: "full-backup", at: "6 hours ago" }],
+    sshKeys: [],
+    disks: [
+      { dev: "sda", source: "/dev/zvol/tank/vms/backup/disk0", format: "raw · zvol", capacity: 32 * GiB,
+        rdBps: 0, wrBps: 0, errors: 0 }
+    ],
+    nics: [
+      { device: "tap15", guest: "eth0", mac: "52:54:00:66:77:88",
+        rxBps: 0, txBps: 0, errors: 0, drops: 0 }
+    ]
+  }
+];
+
+// Keep the base rates aside so the jitter interval can wobble the live
+// numbers around without drifting into nonsense over time.
+VMS.forEach(vm => {
+  (vm.disks || []).forEach(d => { d.rdBase = d.rdBps; d.wrBase = d.wrBps; });
+  (vm.nics || []).forEach(n => { n.rxBase = n.rxBps; n.txBase = n.txBps; });
+});
+
+const findVM = domain => VMS.find(v => v.domain === domain);
+
+// --- row + panel rendering ----------------------------------------------
+
+const rowsEl = document.getElementById("rows");
+const openSet = new Set(["7_web-01"]); // the demo row starts expanded
+
+function rowHtml(vm) {
+  const isOpen = openSet.has(vm.domain);
+  const cpu = vm.running
+    ? (vm.cpuKnown ? meter(vm.cpuPercent, vm.cpuPercent.toFixed(1) + "%")
+                   : `<span class="dash">measuring…</span>`)
+    : `<span class="dash">—</span>`;
+  const mem = vm.running
+    ? (vm.memKnown
+        ? meter(vm.memUsedKiB / vm.memTotalKiB * 100,
+                `${fmtKiB(vm.memUsedKiB)} / ${fmtKiB(vm.memTotalKiB)}`)
+        : `<div class="val sub">${fmtKiB(vm.memTotalKiB)} allocated</div>`)
+    : `<div class="val sub">${fmtKiB(vm.memTotalKiB)} allocated</div>`;
+  return `<tr class="${vm.state === "stopped" ? "stopped" : ""} vmrow ${isOpen ? "open" : ""}">
+    <td class="vmcell" data-domain="${esc(vm.domain)}" title="click to ${isOpen ? "collapse" : "expand"}">
+      <span class="chev" aria-hidden="true">▶</span>
+      <span class="name">${esc(vm.hostname || vm.name)}</span>
+      <div class="sub">${esc(vm.domain)} · ${vm.vcpus} vCPU</div>
+      ${agentNote(vm)}
+    </td>
+    <td>${stateBadge(vm)}</td>
+    <td>${cpu}</td>
+    <td>${mem}</td>
+    <td>${addresses(vm)}</td>
+    <td>${osHtml(vm)}</td>
+    <td>${storage(vm)}</td>
+  </tr>`;
+}
+
+function detailHtml(vm) {
+  return `<tr class="detail" data-domain="${esc(vm.domain)}"><td colspan="7">${panelHtml(vm)}</td></tr>`;
+}
+
+function panelHtml(vm) {
+  return `<div class="panel">
+    <div class="panel-actions">
+      <span class="menu-wrap">
+        <button class="menu-btn" aria-haspopup="true" aria-expanded="false">power ▾</button>
+        ${powerMenuHtml(vm)}
+      </span>
+      <button data-snap-open="${esc(vm.domain)}">snapshot…</button>
+      <button data-ssh-open="${esc(vm.domain)}">ssh keys…</button>
+      <button data-xml-open="${esc(vm.domain)}">raw xml</button>
+    </div>
+    <div class="grid2">${drivesHtml(vm)}${networkHtml(vm)}</div>
+    ${snapsHtml(vm)}
+  </div>`;
+}
+
+function powerMenuHtml(vm) {
+  const busy = !!vm.busy;
+  const running = vm.running && !busy;
+  const stopped = vm.state === "stopped" && !busy;
+  const paused = vm.state === "paused" && !busy;
+  const item = (act, label, enabled, danger, hint) =>
+    `<button class="menu-item ${danger ? "danger" : ""}" data-act="${act}" data-domain="${esc(vm.domain)}" ${enabled ? "" : "disabled"}${hint ? ` title="${esc(hint)}"` : ""}>${label}</button>`;
+  return `<div class="menu" hidden>
+    ${item("start", "start", stopped)}
+    ${item("pause", "pause", running)}
+    ${item("resume", "resume", paused)}
+    ${item("restart", "restart…", running)}
+    ${item("shutdown", "shut down…", running, false, paused ? "ACPI never reaches a paused guest" : "")}
+    ${item("forceoff", "force off…", running || paused, true)}
+  </div>`;
+}
+
+function drivesHtml(vm) {
+  const items = (vm.disks || []).map(d => {
+    const head = `<div class="dev-name" title="${esc(d.source)}">${esc(d.dev)} <span class="sub">· ${fmtBytes(d.capacity)} · ${esc(d.format)}</span></div>`;
+    if (!vm.running) {
+      return `<div class="dev">${head}<div class="note">rates show once the VM is running</div></div>`;
+    }
+    return `<div class="dev">${head}
+      <div class="statline"><span>↓ read</span><span class="num">${fmtBytes(d.rdBps)}/s</span></div>
+      <div class="statline"><span>↑ write</span><span class="num">${fmtBytes(d.wrBps)}/s</span></div>
+    </div>`;
+  }).join("");
+  return `<div class="mini"><h3>drives</h3>${items || `<div class="note">—</div>`}</div>`;
+}
+
+function networkHtml(vm) {
+  let items;
+  if (!vm.running || !(vm.nics || []).length) {
+    items = `<div class="note">${vm.running ? "—" : "interfaces show once the VM is running"}</div>`;
+  } else {
+    items = vm.nics.map(n => `
+      <div class="dev">
+        <div class="dev-name">${esc(n.guest)} <span class="sub">· ${esc(n.device)} · ${esc(n.mac)}</span></div>
+        <div class="statline"><span>↓ receive</span><span class="num">${fmtBytes(n.rxBps)}/s</span></div>
+        <div class="statline"><span>↑ send</span><span class="num">${fmtBytes(n.txBps)}/s</span></div>
+      </div>`).join("");
+  }
+  return `<div class="mini"><h3>network</h3>${items}</div>`;
+}
+
+function snapsHtml(vm) {
+  const list = (vm.snapshots || []).map(s => `
+    <div class="snap-row">
+      <span class="snap-name">${esc(s.name)}</span>
+      <span class="snap-age">${esc(s.at)}</span>
+      <span class="filler"></span>
+      <span class="menu-wrap">
+        <button class="pill-sm menu-btn">restore ▾</button>
+        <div class="menu" hidden>
+          <button class="menu-item" data-restore-auto="${esc(vm.domain)}|${esc(s.name)}">automated rollback…</button>
+          <button class="menu-item danger" data-restore-manual="${esc(vm.domain)}|${esc(s.name)}">manual rollback…</button>
+        </div>
+      </span>
+      <button class="pill-sm" data-del="${esc(vm.domain)}|${esc(s.name)}">delete</button>
+    </div>`).join("");
+  return `<div class="mini"><h3>snapshots</h3>${list || `<div class="note">no snapshots yet — the “snapshot…” pill makes one.</div>`}</div>`;
+}
+
+function render() {
+  closeMenus();
+  rowsEl.innerHTML = VMS.map(vm => rowHtml(vm) + (openSet.has(vm.domain) ? detailHtml(vm) : "")).join("");
+}
+
+// --- power menu ----------------------------------------------------------
+
+let openMenuEl = null;
+
+function toggleMenu(btn) {
+  const menu = btn.parentElement.querySelector(".menu");
+  if (openMenuEl && openMenuEl !== menu) openMenuEl.hidden = true;
+  menu.hidden = !menu.hidden;
+  openMenuEl = menu.hidden ? null : menu;
+  btn.setAttribute("aria-expanded", String(!menu.hidden));
+}
+
+function closeMenus() {
+  if (openMenuEl) openMenuEl.hidden = true;
+  openMenuEl = null;
+}
+
+document.addEventListener("click", e => {
+  if (!e.target.closest(".menu-wrap")) closeMenus();
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") closeMenus();
+});
+
+// --- confirm dialog (returns a promise) ----------------------------------
+
+const cfDlg = document.getElementById("confirm-dialog");
+let cfResolve = null;
+let cfOk = false;
+
+function confirmBox({ title, desc, label, danger }) {
+  document.getElementById("cf-title").textContent = title;
+  document.getElementById("cf-desc").textContent = desc;
+  const ok = document.getElementById("cf-ok");
+  ok.textContent = label;
+  ok.className = danger ? "btn-danger" : "";
+  cfOk = false;
+  cfDlg.showModal();
+  return new Promise(res => { cfResolve = res; });
+}
+
+document.getElementById("cf-ok").addEventListener("click", () => { cfOk = true; cfDlg.close(); });
+document.getElementById("cf-cancel").addEventListener("click", () => cfDlg.close());
+cfDlg.addEventListener("close", () => {
+  if (cfResolve) { cfResolve(cfOk); cfResolve = null; }
+});
+
+// --- power actions (fake) ------------------------------------------------
+
+function handleAction(domain, act) {
+  const vm = findVM(domain);
+  if (!vm) return;
+  if (act === "pause") {
+    vm.state = "paused";
+    vm.running = false;
+    render();
+    toast(`${vm.name} paused (mock)`);
+    return;
+  }
+  if (act === "resume") {
+    vm.state = "running";
+    vm.running = true;
+    render();
+    toast(`${vm.name} resumed (mock)`);
+    return;
+  }
+  if (act === "start") { doPower(vm, "start"); return; }
+  if (act === "forceoff") {
+    confirmBox({
+      title: `force off "${vm.name}"?`,
+      desc: "pulls the power cord. the VM gets no chance to save anything — only for a wedged VM.",
+      label: "force off", danger: true
+    }).then(ok => {
+      if (!ok) return;
+      confirmBox({
+        title: `really force off "${vm.name}"?`,
+        desc: "second and final warning. this kills the VM immediately — databases and anything mid-write can lose recent work.",
+        label: "yes, force off", danger: true
+      }).then(ok2 => { if (ok2) doPower(vm, "forceoff"); });
+    });
+    return;
+  }
+  const texts = {
+    restart: { title: `restart "${vm.name}"?`, desc: "the VM will reboot. unsaved work may be lost.", label: "restart", danger: false },
+    shutdown: { title: `shut down "${vm.name}"?`, desc: "the VM gets a graceful shutdown request. unsaved work may be lost.", label: "shut down", danger: false }
+  };
+  confirmBox(texts[act]).then(ok => { if (ok) doPower(vm, act); });
+}
+
+function doPower(vm, act) {
+  vm.busy = true;
+  if (act === "start") {
+    vm.state = "starting";
+    render();
+    toast("start requested — poller will confirm (mock)");
+    setTimeout(() => { vm.busy = false; vm.state = "running"; vm.running = true; render(); }, 1500);
+    return;
+  }
+  if (act === "forceoff") {
+    vm.busy = false;
+    vm.state = "stopped";
+    vm.running = false;
+    render();
+    toast(`pulled the power on ${vm.name} (mock)`);
+    return;
+  }
+  vm.state = act === "restart" ? "restarting" : "stopping";
+  render();
+  toast(`${act === "restart" ? "restart" : "shutdown"} requested — poller will confirm (mock)`);
+  setTimeout(() => {
+    vm.busy = false;
+    if (act === "restart") vm.state = "running";
+    else { vm.state = "stopped"; vm.running = false; }
+    render();
+  }, 2500);
+}
+
+// --- snapshot actions (fake) ---------------------------------------------
+
+const snapDlg = document.getElementById("snap-dialog");
+let snapVm = null;
+
+function openSnapDialog(domain) {
+  snapVm = findVM(domain);
+  document.getElementById("snap-vm").textContent = snapVm.name;
+  document.getElementById("snap-name").value = "";
+  document.getElementById("snap-msg").textContent = "";
+  snapDlg.showModal();
+}
+
+document.getElementById("snap-create").addEventListener("click", () => {
+  const name = document.getElementById("snap-name").value.trim();
+  if (!name) {
+    document.getElementById("snap-msg").textContent = "give it a name first";
+    return;
+  }
+  snapVm.snapshots.unshift({ name, at: "just now" });
+  snapDlg.close();
+  render();
+  toast(`snapshot "${name}" created (mock)`);
+});
+document.getElementById("snap-cancel").addEventListener("click", () => snapDlg.close());
+
+function deleteSnapshot(domain, name) {
+  const vm = findVM(domain);
+  confirmBox({
+    title: `delete snapshot "${name}"?`,
+    desc: "the snapshot and anything only it remembers will be gone for good.",
+    label: "delete", danger: true
+  }).then(ok => {
+    if (!ok) return;
+    vm.snapshots = vm.snapshots.filter(s => s.name !== name);
+    render();
+    toast(`deleted "${name}" (mock)`);
+  });
+}
+
+function restoreManual(domain, name) {
+  const vm = findVM(domain);
+  if (vm.state === "stopped") {
+    confirmBox({
+      title: `roll back "${vm.name}" to "${name}"?`,
+      desc: "the disks jump back to how they were when the snapshot was taken. everything since is gone.",
+      label: "roll back", danger: true
+    }).then(ok => { if (ok) toast(`rollback issued — "${name}" (mock)`); });
+    return;
+  }
+  confirmBox({
+    title: `manual rollback of "${vm.name}" to "${name}"?`,
+    desc: "the VM should be shut down first — rolling back under a running VM can corrupt its disks. only continue if you're sure it's safe.",
+    label: "proceed anyway", danger: true
+  }).then(ok => { if (ok) toast("rollback issued — fingers crossed (mock)"); });
+}
+
+// --- automated rollback: the stage dialog ---------------------------------
+
+const stageDlg = document.getElementById("stage-dialog");
+let stageVm = null;
+let stageSnap = "";
+let stageRun = 0;
+let stageTimers = [];
+
+function stageRow(label, note) {
+  return `<div class="stage"><span class="dot"></span><span class="st-label">${esc(label)}</span><span class="st-note">${esc(note)}</span></div>`;
+}
+
+function openStageDialog(domain, snapName) {
+  stageVm = findVM(domain);
+  stageSnap = snapName;
+  document.getElementById("stage-vm").textContent = stageVm.name;
+  const target = document.getElementById("stage-target");
+  target.innerHTML = (stageVm.snapshots || []).map(s =>
+    `<option value="${esc(s.name)}">${esc(s.name)} · ${esc(s.at)}</option>`
+  ).join("");
+  target.value = snapName;
+  target.disabled = false;
+  const startToggle = document.getElementById("stage-start");
+  startToggle.checked = true;
+  startToggle.disabled = false;
+  const steps = [];
+  if (stageVm.state === "paused") steps.push(["force off the VM", "it's paused — graceful shutdown can't reach it"]);
+  else if (stageVm.state !== "stopped") steps.push(["shut down the VM", "graceful shutdown request"]);
+  if (stageVm.state !== "stopped") steps.push(["wait for it to stop", "the poller confirms"]);
+  steps.push(["roll back the zvols", "zfs rollback via the TrueNAS API"]);
+  steps.push(["start the VM again", "skipped if unchecked"]);
+  document.getElementById("stage-list").innerHTML = steps.map(s => stageRow(s[0], s[1])).join("");
+  document.getElementById("stage-begin").hidden = false;
+  document.getElementById("stage-cancel").hidden = false;
+  document.getElementById("stage-close").hidden = true;
+  stageDlg.showModal();
+}
+
+function setStage(i, cls, note) {
+  const row = document.getElementById("stage-list").children[i];
+  row.className = "stage " + cls;
+  row.querySelector(".st-note").textContent = note;
+}
+
+function stageSleep(ms) {
+  return new Promise(res => stageTimers.push(setTimeout(res, ms)));
+}
+
+async function beginRollback() {
+  const run = ++stageRun;
+  const vm = stageVm;
+  const alive = () => run === stageRun && stageDlg.open;
+  document.getElementById("stage-begin").hidden = true;
+  document.getElementById("stage-cancel").hidden = true;
+  stageSnap = document.getElementById("stage-target").value;
+  document.getElementById("stage-target").disabled = true;
+  document.getElementById("stage-start").disabled = true;
+  let i = 0;
+  try {
+    if (vm.state !== "stopped") {
+      setStage(i, "active", "requested");
+      if (vm.state === "paused") {
+        vm.state = "stopped";
+        vm.running = false;
+        render();
+      } else {
+        vm.busy = true;
+        vm.state = "stopping";
+        render();
+      }
+      await stageSleep(1100); if (!alive()) return;
+      setStage(i, "done", "requested");
+      i++;
+      setStage(i, "active", "poller will confirm…");
+      await stageSleep(2200); if (!alive()) return;
+      vm.busy = false;
+      vm.state = "stopped";
+      vm.running = false;
+      render();
+      setStage(i, "done", "stopped");
+      i++;
+    }
+    setStage(i, "active", "middleware zfs rollback");
+    await stageSleep(1600); if (!alive()) return;
+    setStage(i, "done", "rolled back");
+    i++;
+    if (document.getElementById("stage-start").checked) {
+      setStage(i, "active", "start requested");
+      await stageSleep(900); if (!alive()) return;
+      vm.state = "running";
+      vm.running = true;
+      render();
+      setStage(i, "done", "running");
+    } else {
+      setStage(i, "skip", "skipped");
+    }
+    toast(`rollback of ${vm.name} to "${stageSnap}" complete (mock)`);
+  } finally {
+    if (alive()) document.getElementById("stage-close").hidden = false;
+  }
+}
+
+document.getElementById("stage-begin").addEventListener("click", beginRollback);
+document.getElementById("stage-cancel").addEventListener("click", () => stageDlg.close());
+document.getElementById("stage-close").addEventListener("click", () => stageDlg.close());
+stageDlg.addEventListener("close", () => {
+  stageRun++;
+  stageTimers.forEach(clearTimeout);
+  stageTimers = [];
+});
+
+// --- raw xml viewer (fake) -------------------------------------------------
+
+function fakeXML(vm) {
+  const lines = [
+    `<domain type='kvm'>`,
+    `  <name>${vm.domain}</name>`,
+    `  <uuid>${vm.uuid}</uuid>`,
+    `  <memory unit='KiB'>${vm.memTotalKiB}</memory>`,
+    `  <currentMemory unit='KiB'>${vm.memTotalKiB}</currentMemory>`,
+    `  <vcpu placement='static'>${vm.vcpus}</vcpu>`,
+    `  <os>`,
+    `    <type arch='x86_64' machine='pc-q35-8.2'>hvm</type>`,
+    `    <boot dev='hd'/>`,
+    `  </os>`,
+    `  <features>`,
+    `    <acpi/>`,
+    `    <apic/>`,
+    `  </features>`,
+    `  <cpu mode='host-model'/>`,
+    `  <clock offset='utc'/>`,
+    `  <on_poweroff>destroy</on_poweroff>`,
+    `  <on_reboot>restart</on_reboot>`,
+    `  <on_crash>destroy</on_crash>`,
+    `  <devices>`
+  ];
+  for (const d of vm.disks || []) {
+    lines.push(
+      `    <disk type='block' device='disk'>`,
+      `      <driver name='qemu' type='raw'/>`,
+      `      <source dev='${d.source}'/>`,
+      `      <target dev='${d.dev}' bus='virtio'/>`,
+      `    </disk>`
+    );
+  }
+  for (const n of vm.nics || []) {
+    lines.push(
+      `    <interface type='bridge'>`,
+      `      <mac address='${n.mac}'/>`,
+      `      <source bridge='br0'/>`,
+      `      <target dev='${n.device}'/>`,
+      `      <model type='virtio'/>`,
+      `    </interface>`
+    );
+  }
+  lines.push(
+    `    <channel type='unix'>`,
+    `      <target type='virtio' name='org.qemu.guest_agent.0'/>`,
+    `    </channel>`,
+    `    <console type='pty'>`,
+    `      <target type='serial' port='0'/>`,
+    `    </console>`,
+    `    <memballoon model='virtio'/>`,
+    `  </devices>`,
+    `</domain>`
+  );
+  return lines.join("\n");
+}
+
+const xmlDlg = document.getElementById("xml-dialog");
+
+function openXmlDialog(domain) {
+  const vm = findVM(domain);
+  document.getElementById("xml-vm").textContent = vm.name;
+  document.getElementById("xml-pre").textContent = fakeXML(vm);
+  xmlDlg.showModal();
+}
+
+document.getElementById("xml-copy").addEventListener("click", () => {
+  const txt = document.getElementById("xml-pre").textContent;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(
+      () => toast("xml copied to clipboard (mock)"),
+      () => toast("clipboard refused — select and copy manually")
+    );
+  } else {
+    toast("no clipboard here — select and copy manually");
+  }
+});
+document.getElementById("xml-close").addEventListener("click", () => xmlDlg.close());
+
+// --- bulk "shut down all" ---------------------------------------------------
+
+document.getElementById("btn-shutdown-all").addEventListener("click", () => {
+  const targets = VMS.filter(v => v.running && v.agent === "ok");
+  const skipped = VMS.filter(v => v.running && v.agent !== "ok");
+  const paused = VMS.filter(v => v.state === "paused");
+  if (!targets.length) {
+    toast("no running VMs with an agent to ask");
+    return;
+  }
+  const bits = ["will ask: " + targets.map(v => v.name).join(", ")];
+  if (skipped.length) bits.push("skipped (no agent): " + skipped.map(v => v.name).join(", "));
+  if (paused.length) bits.push("paused VMs left alone: " + paused.map(v => v.name).join(", "));
+  confirmBox({
+    title: "shut down all running VMs?",
+    desc: bits.join(" · ") + ". each gets a graceful shutdown request, a second apart.",
+    label: "shut down all", danger: false
+  }).then(ok => {
+    if (!ok) return;
+    targets.forEach((vm, i) => {
+      setTimeout(() => {
+        vm.busy = true;
+        vm.state = "stopping";
+        render();
+        setTimeout(() => {
+          vm.busy = false;
+          vm.state = "stopped";
+          vm.running = false;
+          render();
+        }, 2500);
+      }, i * 1000);
+    });
+    toast(`${targets.length} shutdown request${targets.length > 1 ? "s" : ""} sent, staggered — poller will confirm (mock)`);
+  });
+});
+
+// --- ssh keys dialog (fake) ----------------------------------------------
+
+const sshDlg = document.getElementById("ssh-dialog");
+let sshVm = null;
+
+function openSshDialog(domain) {
+  sshVm = findVM(domain);
+  document.getElementById("ssh-vm").textContent = sshVm.name;
+  document.getElementById("ssh-user").value = "";
+  document.getElementById("ssh-new").value = "";
+  sshMsg("");
+  paintSshKeys();
+  sshDlg.showModal();
+}
+
+function paintSshKeys() {
+  const host = document.getElementById("ssh-existing");
+  host.innerHTML = (sshVm.sshKeys || []).map(k => `<div class="keyline">${esc(k)}</div>`).join("")
+    || `<div class="note">no keys yet</div>`;
+}
+
+document.getElementById("ssh-add").addEventListener("click", () => {
+  const user = document.getElementById("ssh-user").value.trim();
+  if (!user) {
+    sshMsg("who gets the keys?");
+    return;
+  }
+  const lines = document.getElementById("ssh-new").value.split("\n")
+    .map(t => t.trim())
+    .filter(t => t && /^(ssh-|ecdsa-|sk-)/.test(t));
+  if (!lines.length) {
+    sshMsg("paste at least one key (ssh-ed25519 …, ssh-rsa …)");
+    return;
+  }
+  sshVm.sshKeys = [...(sshVm.sshKeys || []), ...lines];
+  sshDlg.close();
+  toast(`added ${lines.length} key${lines.length > 1 ? "s" : ""} to ${user}@${sshVm.name} (mock)`);
+});
+document.getElementById("ssh-cancel").addEventListener("click", () => sshDlg.close());
+
+// the browser reads pub key files locally and drops the text into the
+// textarea — nothing is "uploaded" until add keys is clicked. private key
+// files fail the ssh- prefix filter and get rejected here, on purpose.
+const sshFileInput = document.getElementById("ssh-file-input");
+
+function sshMsg(text, ok) {
+  const el = document.getElementById("ssh-msg");
+  el.textContent = text;
+  el.className = "dlg-msg" + (ok ? " ok" : "");
+}
+
+document.getElementById("ssh-file").addEventListener("click", () => sshFileInput.click());
+sshFileInput.addEventListener("change", async () => {
+  const files = [...sshFileInput.files];
+  sshFileInput.value = "";
+  if (!files.length) return;
+  const lines = [];
+  for (const f of files) {
+    try {
+      const good = (await f.text()).split(/\r?\n/).map(t => t.trim())
+        .filter(t => t && /^(ssh-|ecdsa-|sk-)/.test(t));
+      if (good.length) lines.push(...good);
+      else sshMsg(`no keys found in ${f.name}`);
+    } catch (e) {
+      sshMsg(`couldn't read ${f.name}`);
+    }
+  }
+  if (lines.length) {
+    const ta = document.getElementById("ssh-new");
+    const existing = ta.value.split("\n").map(t => t.trim()).filter(Boolean);
+    ta.value = [...existing, ...lines].join("\n");
+    sshMsg(`loaded ${lines.length} key${lines.length > 1 ? "s" : ""} from ${files.length} file${files.length > 1 ? "s" : ""} — check them, then hit add keys`, true);
+  }
+});
+
+// --- one click handler for the whole table -------------------------------
+
+rowsEl.addEventListener("click", e => {
+  const mi = e.target.closest(".menu-item");
+  if (mi) {
+    if (mi.disabled) return;
+    closeMenus();
+    // power menu items carry data-act; restore menu items fall through to
+    // their own data-restore-* handlers below
+    if (mi.dataset.act) {
+      handleAction(mi.dataset.domain, mi.dataset.act);
+      return;
+    }
+  }
+  const mb = e.target.closest(".menu-btn");
+  if (mb) { toggleMenu(mb); return; }
+
+  const cell = e.target.closest(".vmcell");
+  if (cell) {
+    const d = cell.dataset.domain;
+    if (openSet.has(d)) openSet.delete(d); else openSet.add(d);
+    render();
+    return;
+  }
+
+  const snapOpen = e.target.closest("[data-snap-open]");
+  if (snapOpen) { openSnapDialog(snapOpen.dataset.snapOpen); return; }
+  const sshOpen = e.target.closest("[data-ssh-open]");
+  if (sshOpen) { openSshDialog(sshOpen.dataset.sshOpen); return; }
+  const del = e.target.closest("[data-del]");
+  if (del) {
+    const [d, s] = del.dataset.del.split("|");
+    deleteSnapshot(d, s);
+    return;
+  }
+  const rauto = e.target.closest("[data-restore-auto]");
+  if (rauto) {
+    const [d, s] = rauto.dataset.restoreAuto.split("|");
+    openStageDialog(d, s);
+    return;
+  }
+  const rman = e.target.closest("[data-restore-manual]");
+  if (rman) {
+    const [d, s] = rman.dataset.restoreManual.split("|");
+    restoreManual(d, s);
+    return;
+  }
+  const xopen = e.target.closest("[data-xml-open]");
+  if (xopen) { openXmlDialog(xopen.dataset.xmlOpen); return; }
+});
+
+// --- status pill + toast --------------------------------------------------
+
+const statusEl = document.getElementById("status");
+const DEFAULT_STATUS = `${VMS.length} VMs · mock data — nothing is real`;
+let toastTimer = null;
+
+function toast(msg) {
+  statusEl.textContent = msg;
+  statusEl.className = "status toast";
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    statusEl.className = "status";
+    statusEl.textContent = DEFAULT_STATUS;
+  }, 4000);
+}
+
+// --- gentle stat jitter, so the panel feels alive -------------------------
+
+function jitter(v, spread) {
+  const f = 1 + (Math.random() * 2 - 1) * spread;
+  return Math.max(0, Math.round(v * f));
+}
+
+setInterval(() => {
+  let changed = false;
+  for (const vm of VMS) {
+    if (!vm.running || !openSet.has(vm.domain)) continue;
+    (vm.disks || []).forEach(d => {
+      d.rdBps = jitter(d.rdBase, 0.18); d.wrBps = jitter(d.wrBase, 0.18);
+      changed = true;
+    });
+    (vm.nics || []).forEach(n => {
+      n.rxBps = jitter(n.rxBase, 0.25); n.txBps = jitter(n.txBase, 0.25);
+      changed = true;
+    });
+  }
+  if (!changed) return;
+  document.querySelectorAll("tr.detail").forEach(tr => {
+    const vm = findVM(tr.dataset.domain);
+    if (vm) tr.querySelector(".grid2").innerHTML = drivesHtml(vm) + networkHtml(vm);
+  });
+}, 2000);
+
+// --- appearance (same wiring as the real page) ----------------------------
+
+document.getElementById("logo-pdm").innerHTML = pdmSVG(4);
+
+function paintAppearance() {
+  if (!window.__pdTheme) return;
+  const themeSelect = document.getElementById("theme-select");
+  const modeSelect = document.getElementById("mode-select");
+  themeSelect.value = window.__pdTheme.theme;
+  modeSelect.value = window.__pdTheme.mode;
+  const singleVariant = window.__pdTheme.themes[window.__pdTheme.theme].length < 2;
+  modeSelect.disabled = singleVariant;
+  modeSelect.title = singleVariant ? "this theme has one fixed variant" : "";
+}
+
+const themeSelect = document.getElementById("theme-select");
+const modeSelect = document.getElementById("mode-select");
+themeSelect.addEventListener("change", () => {
+  if (window.__pdTheme) window.__pdTheme.setTheme(themeSelect.value);
+  paintAppearance();
+});
+modeSelect.addEventListener("change", () => {
+  if (window.__pdTheme) window.__pdTheme.setMode(modeSelect.value);
+  paintAppearance();
+});
+paintAppearance();
+
+statusEl.textContent = DEFAULT_STATUS;
+render();
+</script>
+</body>
+</html>
