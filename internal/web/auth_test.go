@@ -17,7 +17,7 @@ import (
 // newTestServer builds a server with or without a token, as the tests need.
 func newTestServer(token string) *Server {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(model.NewCache(), log, DefaultTheme, token, nil)
+	return New(Config{Cache: model.NewCache(), Log: log, Theme: DefaultTheme, Token: token})
 }
 
 func doGet(s *Server, path string, header http.Header) *httptest.ResponseRecorder {

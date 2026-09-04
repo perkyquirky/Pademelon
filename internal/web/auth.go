@@ -193,7 +193,7 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(map[string]bool{
-		"actions":      false, // Phase 2; flips when action routes land
+		"actions":      s.actions != nil,
 		"authRequired": s.auth.token != "",
 		"exec":         false, // permanently false for now; see §4
 	})

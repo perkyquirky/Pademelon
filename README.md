@@ -33,6 +33,7 @@ Windows and Linux (tested Windows Server 2022 & Ubuntu Server 24.04.4 LTS)
 - Agent version & clock drift per VM
 - VM raw XML viewer
 - Manual refresh button
+- VM power actions — start, shutdown, reboot, force off, pause, resume, and a bulk "shut down all" — behind `-allow-actions` **and** a token, both required; see the auth section below
 - Colour themes — nine built in, pick one in the page header or set the server default with `-theme`
 - Optional token auth — see "Optional auth" below
 
@@ -59,7 +60,12 @@ By default the dashboard is open to anyone who can reach it on the local network
 
 Users can view live stats without authenticating. 
 
-Pademelon will soon have features for controlling VM states. As such Auth is being implimented to ensure that people on the local network cannot make changes unauthenticated. The auth system is NOT intended AT ALL for internet facing.
+Controlling VM states (start, shutdown, reboot, force off, pause, resume, bulk
+"shut down all") needs **both** a token and the `-allow-actions` switch. Set
+`PADAMELON_ALLOW_ACTIONS=true` and the token together, or Pademelon refuses to
+start with action routes on and no token — buttons that stop VMs never exist
+unauthenticated. Without the flag, the dashboard stays fully read-only. The
+auth system is NOT intended AT ALL for internet facing.
 
 You can use a password of your choosing or generate a random string with:
 
@@ -82,6 +88,8 @@ services:
     environment:
       # Generate with: openssl rand -hex 32 or use a password of your choice. 
       - PADAMELON_TOKEN=change-me-to-your-generated-token
+      # Uncomment to unlock the VM power actions (requires the token above):
+      # - PADAMELON_ALLOW_ACTIONS=true
     volumes:
       - /run/truenas_libvirt:/run/truenas_libvirt
     user: "0:0"

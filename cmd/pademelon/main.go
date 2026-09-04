@@ -15,10 +15,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"pademelon/internal/actions"
 	"pademelon/internal/clocks"
 	"pademelon/internal/libvirtsrc"
 	"pademelon/internal/model"
@@ -38,6 +40,7 @@ func main() {
 		concurrency  = flag.Int("concurrency", 8, "how many VMs to interrogate at once")
 		theme        = flag.String("theme", web.DefaultTheme, "default colour theme: "+strings.Join(web.Themes(), ", "))
 		authToken    = flag.String("auth-token", "", "token required by private routes (default: $PADAMELON_TOKEN or $PADAMELON_TOKEN_FILE)")
+		allowActions = flag.Bool("allow-actions", false, "enable VM action routes (start, shutdown, reboot, force off, pause, resume); requires an auth token (default: $PADAMELON_ALLOW_ACTIONS)")
 		logLevel     = flag.String("log-level", "info", "debug, info, warn or error")
 		logFormat    = flag.String("log-format", "text", "text or json")
 		showVersion  = flag.Bool("version", false, "print version and exit")
@@ -72,6 +75,20 @@ func main() {
 		os.Exit(2)
 	}
 
+	// The action flag also reads the environment, for compose parity with
+	// the token. And it flatly refuses to run without a token: actions are
+	// buttons that stop VMs, and buttons that stop VMs don't get to exist
+	// unauthenticated — not even with a warning.
+	actionsOn, err := resolveAllowActions(*allowActions)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pademelon: %v\n", err)
+		os.Exit(2)
+	}
+	if actionsOn && token == "" {
+		fmt.Fprintln(os.Stderr, "pademelon: -allow-actions needs an auth token; generate one with: openssl rand -hex 32")
+		os.Exit(2)
+	}
+
 	if *showVersion {
 		fmt.Println("pademelon", version)
 		return
@@ -103,6 +120,11 @@ func main() {
 	} else {
 		log.Info("auth enabled; private routes require the token", "token_from", tokenSource, "cookie_days", int64(clocks.SessionCookieMaxAge/(24*time.Hour)))
 	}
+	if actionsOn {
+		log.Info("action routes enabled", "timeout", clocks.ActionTimeout.String())
+	} else {
+		log.Info("action routes disabled (-allow-actions is off); the dashboard is read-only")
+	}
 
 	cache := model.NewCache()
 
@@ -120,6 +142,17 @@ func main() {
 	})
 	defer src.Close()
 
+	var actionStore *actions.Store
+	if actionsOn {
+		actionStore = actions.New(actions.Config{
+			Log:          log,
+			Snapshot:     cache.Get,
+			Conn:         src,
+			Nudge:        nudge,
+			AgentTimeout: *agentTimeout,
+		})
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -127,7 +160,7 @@ func main() {
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           web.New(cache, log, *theme, token, nudge).Handler(),
+		Handler:           web.New(web.Config{Cache: cache, Log: log, Theme: *theme, Token: token, Nudge: nudge, Actions: actionStore}).Handler(),
 		ReadHeaderTimeout: clocks.HeaderReadTimeout,
 	}
 
@@ -157,7 +190,7 @@ func main() {
 // A failed poll is not fatal: the cache keeps the last good data and marks it
 // stale, and the next tick tries to reconnect. libvirtd restarting or the NAS
 // rebooting should never need this container restarted.
-func pollLoop(ctx context.Context, src *libvirtsrc.Source, cache *model.Cache, interval time.Duration, nudge <-chan struct{}, log *slog.Logger) {
+func pollLoop(ctx context.Context, src *libvirtsrc.Source, cache *model.Cache, interval time.Duration, nudge chan struct{}, log *slog.Logger) {
 	poll := func() {
 		snap, err := src.Poll()
 		if err != nil {
@@ -181,11 +214,21 @@ func pollLoop(ctx context.Context, src *libvirtsrc.Source, cache *model.Cache, i
 			poll()
 			last = time.Now()
 		case <-nudge:
-			if time.Since(last) < clocks.NudgeInterval {
+			delay := clocks.NudgeInterval - time.Since(last)
+			if delay <= 0 {
+				poll()
+				last = time.Now()
 				continue
 			}
-			poll()
-			last = time.Now()
+			// Too soon after the last poll — but don't lose the request
+			// entirely (a finished action would rather like its state
+			// change noticed). Re-poke when the debounce window is over.
+			time.AfterFunc(delay, func() {
+				select {
+				case nudge <- struct{}{}:
+				default:
+				}
+			})
 		}
 	}
 }
@@ -244,6 +287,22 @@ func resolveToken(flagValue string) (token, source string, err error) {
 		return "", "", fmt.Errorf("auth token is configured but empty; generate one with: openssl rand -hex 32")
 	}
 	return token, source, nil
+}
+
+// resolveAllowActions combines the -allow-actions flag with the
+// PADAMELON_ALLOW_ACTIONS environment variable, for compose parity with
+// the token. A garbage value is an error, not a silent false — same
+// strictness as an explicitly-empty token.
+func resolveAllowActions(flagValue bool) (bool, error) {
+	raw := strings.TrimSpace(os.Getenv("PADAMELON_ALLOW_ACTIONS"))
+	if raw == "" {
+		return flagValue, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("PADAMELON_ALLOW_ACTIONS is %q, want a boolean (true/false/1/0)", raw)
+	}
+	return v, nil
 }
 
 func newLogger(level, format string) (*slog.Logger, error) {
