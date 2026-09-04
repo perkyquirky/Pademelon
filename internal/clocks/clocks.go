@@ -89,4 +89,11 @@ const (
 	// ShutdownTimeout is how long graceful shutdown waits for in-flight
 	// requests before walking away.
 	ShutdownTimeout = 5 * time.Second
+
+	// NudgeInterval is the minimum gap between poll nudges. The refresh
+	// button (and, in a later phase, a just-finished action) asks the poll
+	// loop for an out-of-band poll through a debounced channel; a nudge
+	// arriving sooner than this after the previous poll is dropped, so a
+	// browser hammering the refresh route can't hammer libvirt.
+	NudgeInterval = 5 * time.Second
 )

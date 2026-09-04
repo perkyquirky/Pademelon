@@ -106,6 +106,11 @@ func main() {
 
 	cache := model.NewCache()
 
+	// The web layer can nudge the poll loop for an early poll (refresh
+	// button, later the post-action poke). One slot, non-blocking: a nudge
+	// arriving while one is already pending is dropped, not queued.
+	nudge := make(chan struct{}, 1)
+
 	src := libvirtsrc.New(libvirtsrc.Config{
 		Socket:       *socket,
 		AgentTimeout: *agentTimeout,
@@ -118,11 +123,11 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	go pollLoop(ctx, src, cache, *interval, log)
+	go pollLoop(ctx, src, cache, *interval, nudge, log)
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           web.New(cache, log, *theme, token).Handler(),
+		Handler:           web.New(cache, log, *theme, token, nudge).Handler(),
 		ReadHeaderTimeout: clocks.HeaderReadTimeout,
 	}
 
@@ -144,11 +149,15 @@ func main() {
 }
 
 // pollLoop polls straight away, then on the interval, until ctx is done.
+// A nudge on the channel asks for an early poll — the refresh button uses
+// it, and later phases will too. Nudges are debounced: one arriving sooner
+// than clocks.NudgeInterval after the previous poll is dropped, so a
+// browser hammering the refresh route can't hammer libvirt.
 //
 // A failed poll is not fatal: the cache keeps the last good data and marks it
 // stale, and the next tick tries to reconnect. libvirtd restarting or the NAS
 // rebooting should never need this container restarted.
-func pollLoop(ctx context.Context, src *libvirtsrc.Source, cache *model.Cache, interval time.Duration, log *slog.Logger) {
+func pollLoop(ctx context.Context, src *libvirtsrc.Source, cache *model.Cache, interval time.Duration, nudge <-chan struct{}, log *slog.Logger) {
 	poll := func() {
 		snap, err := src.Poll()
 		if err != nil {
@@ -160,6 +169,7 @@ func pollLoop(ctx context.Context, src *libvirtsrc.Source, cache *model.Cache, i
 	}
 
 	poll()
+	last := time.Now()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -169,6 +179,13 @@ func pollLoop(ctx context.Context, src *libvirtsrc.Source, cache *model.Cache, i
 			return
 		case <-ticker.C:
 			poll()
+			last = time.Now()
+		case <-nudge:
+			if time.Since(last) < clocks.NudgeInterval {
+				continue
+			}
+			poll()
+			last = time.Now()
 		}
 	}
 }

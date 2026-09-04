@@ -1,10 +1,15 @@
 // Package web serves the dashboard.
 //
-// The read tier is GET-only and anonymous: every read handler reads from the
-// cache, no handler passes anything from a request through to libvirt, and
-// domain names come from the poller, never from a query string. A private
-// tier (see auth.go) sits behind a static token; it is only registered when
-// a token is configured.
+// The read tier is GET-only and anonymous: every read handler reads from
+// the cache, and nothing a request carries ever reaches libvirt — the
+// poller gathers, handlers pour. /api/vm/{name}/xml is the one route with
+// a domain name in the URL; it serves the poller's cached copy of the XML
+// and 404s for any name the poller didn't report, so the old "domain names
+// never come from a URL" rule still holds where it matters. POST
+// /api/refresh asks the poll loop for an early poll through a debounced
+// channel; the loop, not the request, decides when libvirt is polled.
+// A private tier (see auth.go) sits behind a static token; it is only
+// registered when a token is configured.
 package web
 
 import (
@@ -33,14 +38,17 @@ type Server struct {
 	log   *slog.Logger
 	theme string
 	auth  authState
+	nudge chan<- struct{}
 }
 
-// New returns a Server reading from cache. theme is the default colour theme
-// sent to browsers that haven't picked one themselves; validate it with
-// ValidTheme before calling. An empty authToken disables auth entirely —
-// the private tier (currently /api/auth/check, later the action routes) is
-// not even registered without one.
-func New(cache *model.Cache, log *slog.Logger, theme, authToken string) *Server {
+// New returns a Server reading from cache. theme is the default colour
+// theme sent to browsers that haven't picked one themselves; validate it
+// with ValidTheme before calling. An empty authToken disables auth
+// entirely — the private tier (currently /api/auth/check, later the action
+// routes) is not even registered without one. nudge is the channel the
+// refresh route pokes to ask the poll loop for an early poll; nil disables
+// the poke (tests pass nil).
+func New(cache *model.Cache, log *slog.Logger, theme, authToken string, nudge chan<- struct{}) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -52,6 +60,7 @@ func New(cache *model.Cache, log *slog.Logger, theme, authToken string) *Server 
 		log:   log,
 		theme: theme,
 		auth:  authState{token: authToken, failures: make(map[string]*authFailure)},
+		nudge: nudge,
 	}
 }
 
@@ -60,6 +69,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
 	mux.HandleFunc("GET /api/vms", s.handleVMs)
+	mux.HandleFunc("GET /api/vm/{name}/xml", s.handleVMXML)
+	mux.HandleFunc("POST /api/refresh", s.handleRefresh)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/capabilities", s.handleCapabilities)
 	if s.auth.token != "" {
@@ -93,6 +104,48 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 	if err := enc.Encode(snap); err != nil {
 		s.log.Error("encode snapshot", "err", err)
 	}
+}
+
+// handleVMXML serves the raw domain XML for one VM. The XML comes straight
+// from the cache — the poller already fetched it on its last round — so a
+// request never reaches libvirt, and a domain the poller hasn't reported
+// gets a 404. That guard is what keeps a guessed name from being worth
+// anything.
+func (s *Server) handleVMXML(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	for _, vm := range s.cache.Get().VMs {
+		if vm.Domain != name {
+			continue
+		}
+		if vm.XML == "" {
+			break
+		}
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte(vm.XML))
+		return
+	}
+	http.NotFound(w, r)
+}
+
+// handleRefresh pokes the poll loop for an out-of-band poll. It is a
+// debounced nudge, not a command: the channel holds one slot, the poll
+// loop drops nudges that arrive too soon after the previous poll, and a
+// wedged guest can never turn this into a slow page load.
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	if s.nudge != nil {
+		select {
+		case s.nudge <- struct{}{}:
+			_, _ = w.Write([]byte("nudged\n"))
+			return
+		default:
+			_, _ = w.Write([]byte("already nudged\n"))
+			return
+		}
+	}
+	_, _ = w.Write([]byte("ok\n"))
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
