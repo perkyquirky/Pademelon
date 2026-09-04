@@ -76,6 +76,41 @@ func Ping(c Caller) error {
 	return nil
 }
 
+// Info returns the agent's self-reported version (e.g. "8.2") and the
+// list of commands this build supports. The version answers "why doesn't
+// this VM show X?" in one glance; the command list is how later features
+// degrade honestly on old agents instead of throwing errors.
+func Info(c Caller) (version string, commands []string, err error) {
+	var r struct {
+		Version   string `json:"version"`
+		Supported []struct {
+			Name string `json:"name"`
+		} `json:"supported_commands"`
+	}
+	if err := call(c, `{"execute":"guest-info"}`, &r); err != nil {
+		return "", nil, err
+	}
+	names := make([]string, 0, len(r.Supported))
+	for _, cmd := range r.Supported {
+		names = append(names, cmd.Name)
+	}
+	return r.Version, names, nil
+}
+
+// Time returns the guest's wall clock as nanoseconds since the epoch.
+// The reply is the bare number itself — `{"return":<nanos>}` — which the
+// live test on a real QGA 11 agent settled after the docs-shaped guess
+// turned out wrong. Compared against the host clock at poll time it gives
+// the clock drift: a paused or restored VM is minutes out; a healthy one
+// sits within a second or two of noise.
+func Time(c Caller) (int64, error) {
+	var nanos int64
+	if err := call(c, `{"execute":"guest-get-time"}`, &nanos); err != nil {
+		return 0, err
+	}
+	return nanos, nil
+}
+
 // Hostname returns the guest's hostname.
 func Hostname(c Caller) (string, error) {
 	var r struct {

@@ -38,6 +38,34 @@ type Iface struct {
 	Virtual bool     `json:"virtual"` // loopback, docker bridge, veth, etc
 }
 
+// Disk is one virtual disk, as the host side sees it. Shape comes from the
+// domain XML; the rates come from libvirt's cumulative block counters,
+// turned into bytes-per-second the same way the CPU column is.
+type Disk struct {
+	Dev           string `json:"dev"`              // vda, sdb, ...
+	Source        string `json:"source,omitempty"` // zvol path or file path
+	Format        string `json:"format,omitempty"` // raw, qcow2, ...
+	Bus           string `json:"bus,omitempty"`    // virtio, sata, ...
+	CapacityBytes uint64 `json:"capacityBytes"`    // 0 when we couldn't ask
+	RdBytesPS     uint64 `json:"rdBytesPs"`
+	WrBytesPS     uint64 `json:"wrBytesPs"`
+	RatesKnown    bool   `json:"ratesKnown"` // false on the first poll, no delta yet
+}
+
+// Nic is one virtual network interface, host side. Device is the tap
+// device libvirt made for it; GuestName is filled in when the agent's
+// interface list contains a matching MAC, so the row can say "eth0"
+// instead of "tap-something".
+type Nic struct {
+	Device     string `json:"device"`
+	MAC        string `json:"mac,omitempty"`
+	Bridge     string `json:"bridge,omitempty"`
+	GuestName  string `json:"guestName,omitempty"`
+	RxBytesPS  uint64 `json:"rxBytesPs"`
+	TxBytesPS  uint64 `json:"txBytesPs"`
+	RatesKnown bool   `json:"ratesKnown"`
+}
+
 // Filesystem is one mounted filesystem inside the guest.
 type Filesystem struct {
 	Mountpoint string `json:"mountpoint"`
@@ -81,8 +109,27 @@ type VM struct {
 	OS         string     `json:"os,omitempty"`
 	Kernel     string     `json:"kernel,omitempty"`
 
+	// AgentVersion is what guest-info calls itself, e.g. "8.2" — answers
+	// "why doesn't this VM show X?" in one glance. ClockDriftSeconds is the
+	// guest clock minus the host clock at poll time; positive means the
+	// guest is ahead. A paused or recently restored VM drifts; a healthy
+	// one sits inside a second or two of noise.
+	AgentVersion      string  `json:"agentVersion,omitempty"`
+	ClockDriftSeconds float64 `json:"clockDriftSeconds"`
+	ClockDriftKnown   bool    `json:"clockDriftKnown"`
+
 	Interfaces  []Iface      `json:"interfaces"`
 	Filesystems []Filesystem `json:"filesystems"`
+
+	// Host-side shapes from the domain XML, with rates filled in while the
+	// VM runs. These work whether or not the guest has an agent.
+	Disks []Disk `json:"disks"`
+	Nics  []Nic  `json:"nics"`
+
+	// XML is the raw domain definition from the last poll, served by
+	// /api/vm/{name}/xml. Storing it keeps the architecture honest: the
+	// poller talks to libvirt, handlers read the cache.
+	XML string `json:"xml,omitempty"`
 
 	Updated time.Time `json:"updated"`
 	Stale   bool      `json:"stale"` // last poll failed, showing older data

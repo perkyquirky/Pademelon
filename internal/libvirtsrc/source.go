@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,6 +73,12 @@ type Source struct {
 	// libvirt's cumulative nanosecond counter into a percentage.
 	prevCPU map[string]cpuSample
 
+	// prevBlock and prevNet hold the previous poll's cumulative byte
+	// counters per disk and NIC, keyed by domain and device — the same
+	// delta-between-polls trick the CPU column uses, applied to throughput.
+	prevBlock map[string]blockSample
+	prevNet   map[string]netSample
+
 	// lastAgent remembers each VM's agent state so we can log the transition
 	// once instead of moaning about the same missing agent every 30 seconds.
 	lastAgent map[string]model.AgentState
@@ -88,6 +95,16 @@ type Source struct {
 type cpuSample struct {
 	cpuTime uint64
 	at      time.Time
+}
+
+type blockSample struct {
+	rdBytes, wrBytes uint64
+	at               time.Time
+}
+
+type netSample struct {
+	rxBytes, txBytes uint64
+	at               time.Time
 }
 
 // New builds a Source. It does not connect — Poll does that on demand and
@@ -117,6 +134,8 @@ func New(cfg Config) *Source {
 		cfg:            cfg,
 		log:            cfg.Log,
 		prevCPU:        map[string]cpuSample{},
+		prevBlock:      map[string]blockSample{},
+		prevNet:        map[string]netSample{},
 		lastAgent:      map[string]model.AgentState{},
 		lastMemStale:   map[string]bool{},
 		statsPeriodSet: map[string]bool{},
@@ -252,11 +271,34 @@ func (s *Source) inspect(conn *libvirt.Libvirt, d libvirt.Domain) model.VM {
 	vm.VCPUs = int(vcpus)
 	vm.MemTotalKiB = maxMem
 
+	// The XML is worth fetching for every VM, running or not: disks, NICs
+	// and the agent channel state all live in it. A stopped VM reports the
+	// shapes (which disk, which bus) but libvirt can't answer capacity or
+	// rate questions about a machine that isn't running.
+	xmlDesc, err := conn.DomainGetXMLDesc(d, 0)
+	if err != nil {
+		s.log.Warn("domain xml failed", "domain", d.Name, "err", err)
+		if !vm.Running {
+			vm.Agent = model.AgentAbsent
+			return vm
+		}
+		vm.Agent = model.AgentError
+		vm.AgentError = err.Error()
+		return vm
+	}
+	vm.XML = xmlDesc
+
+	dx := parseDomainXML(xmlDesc)
+	vm.UUID = dx.UUID
+	vm.Disks = diskShapes(&dx)
+	vm.Nics = nicShapes(&dx)
+
 	if !vm.Running {
 		// A stopped VM has nothing else to tell us, but it still belongs in
 		// the list — vanishing when you shut one down is exactly the thing
 		// that makes an in-guest monitoring tool useless for this job.
 		s.forgetCPU(d.Name)
+		s.forgetDomainSamples(d.Name)
 		s.forgetStatsPeriod(d.Name)
 		vm.Agent = model.AgentAbsent
 		return vm
@@ -274,32 +316,136 @@ func (s *Source) inspect(conn *libvirt.Libvirt, d libvirt.Domain) model.VM {
 		}
 	}
 
+	// Rates and capacity are host-side numbers: they work even when the
+	// guest has no agent installed at all.
+	now := time.Now()
+	for i := range vm.Disks {
+		s.fillDiskLive(conn, d, &vm.Disks[i], now)
+	}
+	for i := range vm.Nics {
+		s.fillNicLive(conn, d, &vm.Nics[i], now)
+	}
+
 	// Read the channel state out of the XML before calling the agent. A VM
 	// without qemu-guest-agent installed shows state='disconnected', and
 	// skipping it here is the difference between a poll that costs nothing
 	// and one that burns the full agent timeout on every agentless VM.
-	xmlDesc, err := conn.DomainGetXMLDesc(d, 0)
-	if err != nil {
-		s.log.Warn("domain xml failed", "domain", d.Name, "err", err)
-		vm.Agent = model.AgentError
-		vm.AgentError = err.Error()
-		return vm
-	}
-
-	uuid, channelState := parseDomainXML(xmlDesc)
-	vm.UUID = uuid
-
-	switch channelState {
+	switch agentChannelState(&dx) {
 	case "":
 		vm.Agent = model.AgentAbsent
 	case "connected":
 		s.fillFromAgent(conn, d, &vm)
+		joinNicGuestNames(&vm)
 	default:
 		vm.Agent = model.AgentDisconnected
 	}
 
 	s.logAgentTransition(d.Name, vm.Agent)
 	return vm
+}
+
+// fillDiskLive asks libvirt for everything a running disk can tell us: its
+// capacity, and read/write throughput across the last two polls. It mutes
+// itself on any failure — a disk we can't read rates for simply keeps its
+// shape and no numbers.
+func (s *Source) fillDiskLive(conn *libvirt.Libvirt, d libvirt.Domain, disk *model.Disk, now time.Time) {
+	_, capacity, _, err := conn.DomainGetBlockInfo(d, disk.Dev, 0)
+	if err != nil {
+		s.log.Debug("block info failed", "domain", d.Name, "dev", disk.Dev, "err", err)
+	} else {
+		disk.CapacityBytes = capacity
+	}
+
+	key := d.Name + "\x00" + disk.Dev
+	_, rd, _, wr, _, err := conn.DomainBlockStats(d, disk.Dev)
+	if err != nil {
+		s.log.Debug("block stats failed", "domain", d.Name, "dev", disk.Dev, "err", err)
+		return
+	}
+	s.mu.Lock()
+	prev, had := s.prevBlock[key]
+	s.prevBlock[key] = blockSample{rdBytes: uint64(rd), wrBytes: uint64(wr), at: now}
+	s.mu.Unlock()
+
+	if rd < 0 || wr < 0 {
+		// libvirt hands back -1 for counters it can't fill; forget any
+		// previous sample so the next good poll starts fresh rather than
+		// dividing against nonsense.
+		s.mu.Lock()
+		delete(s.prevBlock, key)
+		s.mu.Unlock()
+		return
+	}
+	if !had {
+		return // first poll for this disk: nothing to difference against
+	}
+	elapsed := now.Sub(prev.at)
+	var okRd, okWr bool
+	disk.RdBytesPS, okRd = bytesPerSecond(prev.rdBytes, uint64(rd), elapsed)
+	disk.WrBytesPS, okWr = bytesPerSecond(prev.wrBytes, uint64(wr), elapsed)
+	disk.RatesKnown = okRd && okWr
+}
+
+// fillNicLive is fillDiskLive's network twin: receive/send throughput for
+// one tap device across the last two polls.
+func (s *Source) fillNicLive(conn *libvirt.Libvirt, d libvirt.Domain, nic *model.Nic, now time.Time) {
+	if nic.Device == "" {
+		// No tap device in the XML — libvirt has no counter for it.
+		return
+	}
+	key := d.Name + "\x00" + nic.Device
+	rx, _, _, _, tx, _, _, _, err := conn.DomainInterfaceStats(d, nic.Device)
+	if err != nil {
+		s.log.Debug("interface stats failed", "domain", d.Name, "dev", nic.Device, "err", err)
+		return
+	}
+	s.mu.Lock()
+	prev, had := s.prevNet[key]
+	s.prevNet[key] = netSample{rxBytes: uint64(rx), txBytes: uint64(tx), at: now}
+	s.mu.Unlock()
+
+	if rx < 0 || tx < 0 {
+		s.mu.Lock()
+		delete(s.prevNet, key)
+		s.mu.Unlock()
+		return
+	}
+	if !had {
+		return
+	}
+	elapsed := now.Sub(prev.at)
+	var okRx, okTx bool
+	nic.RxBytesPS, okRx = bytesPerSecond(prev.rxBytes, uint64(rx), elapsed)
+	nic.TxBytesPS, okTx = bytesPerSecond(prev.txBytes, uint64(tx), elapsed)
+	nic.RatesKnown = okRx && okTx
+}
+
+// bytesPerSecond differences two samples of a cumulative byte counter.
+// ok=false when the counter went backwards — the VM restarted and the old
+// sample belongs to a previous lifetime (the same rule cpuPercent uses).
+func bytesPerSecond(prev, nowv uint64, elapsed time.Duration) (uint64, bool) {
+	if elapsed <= 0 || nowv < prev {
+		return 0, false
+	}
+	return uint64(float64(nowv-prev) / elapsed.Seconds()), true
+}
+
+// forgetDomainSamples drops one domain's rate history. Counters are
+// cumulative per QEMU instance, so a stopped or restarted VM's old samples
+// are from a different lifetime.
+func (s *Source) forgetDomainSamples(domain string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k := range s.prevBlock {
+		if strings.HasPrefix(k, domain+"\x00") {
+			delete(s.prevBlock, k)
+		}
+	}
+	for k := range s.prevNet {
+		if strings.HasPrefix(k, domain+"\x00") {
+			delete(s.prevNet, k)
+		}
+	}
 }
 
 // fillFromAgent runs the guest agent queries. Each one is best-effort: a
@@ -337,6 +483,22 @@ func (s *Source) fillFromAgent(conn *libvirt.Libvirt, d libvirt.Domain, vm *mode
 		vm.Filesystems = fs
 	} else {
 		s.log.Debug("fsinfo failed", "domain", d.Name, "err", err)
+	}
+
+	// The version line turns "why doesn't this VM show X?" into a one-
+	// glance answer; the clock drift flags paused or restored VMs whose
+	// guest clock NTP hasn't caught up with yet. Both are best-effort.
+	if version, _, err := agent.Info(call); err == nil {
+		vm.AgentVersion = version
+	} else {
+		s.log.Debug("agent info failed", "domain", d.Name, "err", err)
+	}
+
+	if nsec, err := agent.Time(call); err == nil {
+		vm.ClockDriftSeconds = time.Duration(nsec - time.Now().UnixNano()).Seconds()
+		vm.ClockDriftKnown = true
+	} else {
+		s.log.Debug("guest time failed", "domain", d.Name, "err", err)
 	}
 }
 
@@ -558,6 +720,32 @@ type domainXML struct {
 	XMLName xml.Name `xml:"domain"`
 	UUID    string   `xml:"uuid"`
 	Devices struct {
+		Disks []struct {
+			Device string `xml:"device,attr"` // disk, cdrom, floppy, lun
+			Driver struct {
+				Type string `xml:"type,attr"` // raw, qcow2, ...
+			} `xml:"driver"`
+			Source struct {
+				Dev  string `xml:"dev,attr"`  // block source (zvol)
+				File string `xml:"file,attr"` // file source (qcow2, ISO)
+			} `xml:"source"`
+			Target struct {
+				Dev string `xml:"dev,attr"` // vda
+				Bus string `xml:"bus,attr"` // virtio
+			} `xml:"target"`
+		} `xml:"disk"`
+		Interfaces []struct {
+			Type string `xml:"type,attr"` // bridge, network, direct, ...
+			MAC  struct {
+				Address string `xml:"address,attr"`
+			} `xml:"mac"`
+			Source struct {
+				Bridge string `xml:"bridge,attr"`
+			} `xml:"source"`
+			Target struct {
+				Dev string `xml:"dev,attr"` // the host-side tap device
+			} `xml:"target"`
+		} `xml:"interface"`
 		Channels []struct {
 			Target struct {
 				Type  string `xml:"type,attr"`
@@ -568,19 +756,81 @@ type domainXML struct {
 	} `xml:"devices"`
 }
 
-// parseDomainXML pulls the UUID and the guest agent channel's state. An empty
-// channel state means the VM has no guest agent channel at all.
-func parseDomainXML(raw string) (uuid, channelState string) {
-	var dx domainXML
-	if err := xml.Unmarshal([]byte(raw), &dx); err != nil {
-		return "", ""
-	}
+// parseDomainXML pulls everything we care about out of a domain's XML.
+// A parse failure returns a zero value, which the caller treats as "this VM
+// exists but tells us nothing" rather than dropping the row.
+func parseDomainXML(raw string) (dx domainXML) {
+	_ = xml.Unmarshal([]byte(raw), &dx)
+	return dx
+}
+
+// agentChannelState reads the guest agent channel's state out of the parsed
+// XML. Empty means the VM has no guest agent channel at all.
+func agentChannelState(dx *domainXML) string {
 	for _, ch := range dx.Devices.Channels {
 		if ch.Target.Name == guestAgentChannel {
-			return dx.UUID, ch.Target.State
+			return ch.Target.State
 		}
 	}
-	return dx.UUID, ""
+	return ""
+}
+
+// diskShapes turns the XML disk list into model.Disks. Everything that
+// isn't real storage gets dropped — cdroms and floppies report through the
+// same list and would drown the actual disks, the same way squashfs mounts
+// drown real filesystems in the storage column.
+func diskShapes(dx *domainXML) []model.Disk {
+	out := make([]model.Disk, 0, len(dx.Devices.Disks))
+	for _, xd := range dx.Devices.Disks {
+		if xd.Device != "disk" || xd.Target.Dev == "" {
+			continue // installation media, or a disk too shapeless to show
+		}
+		source := xd.Source.Dev
+		if source == "" {
+			source = xd.Source.File
+		}
+		out = append(out, model.Disk{
+			Dev:    xd.Target.Dev,
+			Source: source,
+			Format: xd.Driver.Type,
+			Bus:    xd.Target.Bus,
+		})
+	}
+	return out
+}
+
+// nicShapes turns the XML interface list into model.Nics. Only the
+// interface types that back a real guest NIC make the cut.
+func nicShapes(dx *domainXML) []model.Nic {
+	out := make([]model.Nic, 0, len(dx.Devices.Interfaces))
+	for _, xi := range dx.Devices.Interfaces {
+		switch xi.Type {
+		case "bridge", "network", "direct", "ethernet":
+		default:
+			continue // user-mode slirp and friends aren't the guest's NIC
+		}
+		out = append(out, model.Nic{
+			Device: xi.Target.Dev,
+			MAC:    strings.ToLower(xi.MAC.Address),
+			Bridge: xi.Source.Bridge,
+		})
+	}
+	return out
+}
+
+// joinNicGuestNames labels each NIC with the guest's own interface name by
+// matching MACs against the agent's interface list. The tap device is what
+// the host calls it; "eth0" is what the guest calls it, and the guest's
+// name is the one humans recognise.
+func joinNicGuestNames(vm *model.VM) {
+	for i := range vm.Nics {
+		for _, iface := range vm.Interfaces {
+			if iface.MAC != "" && strings.EqualFold(iface.MAC, vm.Nics[i].MAC) {
+				vm.Nics[i].GuestName = iface.Name
+				break
+			}
+		}
+	}
 }
 
 func stateName(state uint8) string {

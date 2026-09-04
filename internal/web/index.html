@@ -524,7 +524,7 @@ td {
   vertical-align: top;
 }
 tr:last-child td { border-bottom: none; }
-tbody tr:hover td { background: var(--card2); }
+tbody tr:not(.detail):hover td { background: var(--card2); }
 tr.stopped td { opacity: 0.55; }
 
 .name { font-weight: 700; }
@@ -567,6 +567,96 @@ tr.stopped td { opacity: 0.55; }
 .fs { margin-bottom: 8px; }
 .fs:last-child { margin-bottom: 0; }
 .dash { color: var(--muted); }
+
+/* ---- expansion panel ---- */
+td.vmcell { cursor: pointer; }
+.chev {
+  display: inline-block;
+  width: 1em;
+  font-size: 11px;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+tr.open .chev { transform: rotate(90deg); }
+tr.detail > td { padding: 8px 12px 14px 30px; }
+.panel {
+  border: 2px dotted var(--border-dot);
+  border-radius: 16px;
+  background: var(--card);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.panel-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.panel-actions button {
+  font-size: 12px;
+  border: 2px solid var(--border-dot);
+}
+.panel-actions button:hover { border-color: var(--accent); }
+.guestline {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.guestline .warn { color: var(--warn-tx); font-weight: 700; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 780px) { .grid2 { grid-template-columns: 1fr; } }
+.mini {
+  border: 2px dashed var(--border-soft);
+  border-radius: 14px;
+  background: var(--card2);
+  padding: 10px 14px 8px;
+  min-width: 0;
+}
+.mini h3 {
+  display: inline-block;
+  margin: 0 0 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  border-bottom: 2px dotted var(--border-dot);
+  padding-bottom: 2px;
+}
+.dev { margin-bottom: 8px; }
+.dev:last-child { margin-bottom: 0; }
+.dev-name { font-weight: 700; font-size: 12.5px; }
+.dev-name .sub { margin-left: 6px; }
+.statline {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.statline .num {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+}
+.note { color: var(--muted); font-size: 12.5px; }
+#xml-dialog { max-width: 480px; }
+.xmlpre {
+  max-height: 50vh;
+  overflow: auto;
+  margin: 0;
+  background: var(--card2);
+  border: 2px dashed var(--border-soft);
+  border-radius: 12px;
+  padding: 10px 12px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 
 .empty {
   padding: 32px;
@@ -663,7 +753,8 @@ tr.stopped td { opacity: 0.55; }
     </div>
     <div class="masthead-right">
       <span class="status" id="status">loading…</span>
-      <div class="controls" role="group" aria-label="Appearance">
+      <div class="controls" role="group" aria-label="Controls">
+        <button id="btn-refresh" title="ask for a fresh poll right now">refresh</button>
         <label class="ctl">theme
           <select id="theme-select" aria-label="Colour theme">
             <optgroup label="pademelon">
@@ -737,6 +828,17 @@ tr.stopped td { opacity: 0.55; }
       <button type="submit">log in</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="xml-dialog">
+  <h2 class="card-title"><span class="squig">raw xml</span> → <span id="xml-vm"></span></h2>
+  <p class="auth-hint">the poller's cached copy of the domain definition — read-only.</p>
+  <pre class="xmlpre" id="xml-pre">loading…</pre>
+  <div class="auth-row">
+    <button type="button" id="xml-copy">copy</button>
+    <span style="flex:1"></span>
+    <button type="button" id="xml-close">close</button>
+  </div>
 </dialog>
 
 <script>
@@ -845,6 +947,99 @@ function osHtml(vm) {
     : `<span class="dash">—</span>`;
 }
 
+// --- expansion panel pieces -----------------------------------------------
+
+function fmtDuration(s) {
+  if (s < 90) return s.toFixed(1) + "s";
+  const m = Math.floor(s / 60);
+  if (m < 90) return m + "m" + Math.round(s % 60) + "s";
+  const h = Math.floor(m / 60);
+  return h + "h" + (m % 60) + "m";
+}
+
+function guestInner(vm) {
+  const bits = [];
+  if (vm.agentVersion) bits.push("agent " + esc(vm.agentVersion));
+  if (vm.clockDriftKnown) {
+    const d = vm.clockDriftSeconds, abs = Math.abs(d);
+    // Under a couple of seconds is clock noise between the two reads, not
+    // drift — showing it would just be anxiety fuel. A big positive gap is
+    // the classic paused-or-restored VM waiting for NTP to catch up.
+    if (abs < 2) {
+      bits.push("clock in sync");
+    } else {
+      const txt = "clock " + (d >= 0 ? "+" : "−") + fmtDuration(abs);
+      bits.push(abs >= 60 ? `<span class="warn">${txt}</span>` : txt);
+    }
+  }
+  return bits.join(" · ");
+}
+
+function drivesInner(vm) {
+  const items = (vm.disks || []).map(d => {
+    const sub = [d.capacityBytes ? fmtBytes(d.capacityBytes) : "", d.format, d.bus]
+      .filter(Boolean).map(esc).join(" · ");
+    let lines;
+    if (!vm.running) {
+      lines = `<div class="note">rates show once the VM is running</div>`;
+    } else if (!d.ratesKnown) {
+      lines = `<div class="note">measuring…</div>`;
+    } else {
+      lines =
+        `<div class="statline"><span>↓ read</span><span class="num">${fmtBytes(d.rdBytesPs)}/s</span></div>` +
+        `<div class="statline"><span>↑ write</span><span class="num">${fmtBytes(d.wrBytesPs)}/s</span></div>`;
+    }
+    return `<div class="dev">
+      <div class="dev-name" title="${esc(d.source || "")}">${esc(d.dev)}${sub ? ` <span class="sub">· ${sub}</span>` : ""}</div>
+      ${lines}
+    </div>`;
+  }).join("");
+  return items || `<div class="note">—</div>`;
+}
+
+function drivesHtml(vm) {
+  return `<div class="mini drives"><h3>drives</h3>${drivesInner(vm)}</div>`;
+}
+
+function networkInner(vm) {
+  let items;
+  if (!vm.running) {
+    items = `<div class="note">interfaces show once the VM is running</div>`;
+  } else if (!(vm.nics || []).length) {
+    items = `<div class="note">—</div>`;
+  } else {
+    items = vm.nics.map(n => {
+      const name = n.guestName || n.device || "?";
+      const sub = [n.guestName ? n.device : "", n.mac].filter(Boolean).map(esc).join(" · ");
+      const rates = n.ratesKnown
+        ? `<div class="statline"><span>↓ receive</span><span class="num">${fmtBytes(n.rxBytesPs)}/s</span></div>` +
+          `<div class="statline"><span>↑ send</span><span class="num">${fmtBytes(n.txBytesPs)}/s</span></div>`
+        : `<div class="note">measuring…</div>`;
+      return `<div class="dev">
+        <div class="dev-name">${esc(name)}${sub ? ` <span class="sub">· ${sub}</span>` : ""}</div>
+        ${rates}
+      </div>`;
+    }).join("");
+  }
+  return items;
+}
+
+function networkHtml(vm) {
+  return `<div class="mini network"><h3>network</h3>${networkInner(vm)}</div>`;
+}
+
+function detailHtml(vm, open) {
+  return `<tr class="detail" data-domain="${esc(vm.domain)}"${open ? "" : " hidden"}><td colspan="7">
+    <div class="panel">
+      <div class="panel-actions">
+        <button data-xml="${esc(vm.domain)}">raw xml</button>
+        <span class="guestline"></span>
+      </div>
+      <div class="grid2">${drivesHtml(vm)}${networkHtml(vm)}</div>
+    </div>
+  </td></tr>`;
+}
+
 function row(vm) {
   const cpu = vm.running
     ? (vm.cpuKnown ? meter(vm.cpuPercent, vm.cpuPercent.toFixed(1) + "%")
@@ -859,8 +1054,9 @@ function row(vm) {
     : `<div class="val sub">${fmtKiB(vm.memTotalKiB)} allocated</div>`;
 
   return `<tr class="${vm.running ? "" : "stopped"}">
-    <td>
-      <div class="name">${esc(vm.hostname || vm.name)}</div>
+    <td class="vmcell" data-domain="${esc(vm.domain)}" title="click to open the pouch">
+      <span class="chev" aria-hidden="true">▶</span>
+      <span class="name">${esc(vm.hostname || vm.name)}</span>
       <div class="sub">${esc(vm.domain)} · ${vm.vcpus} vCPU</div>
       ${agentNote(vm)}
     </td>
@@ -874,6 +1070,7 @@ function row(vm) {
 }
 
 const store = new Map();
+let latestVMs = [];
 
 function sig(vm) {
   const ips = [];
@@ -885,7 +1082,13 @@ function sig(vm) {
     vm.hostname || vm.name, vm.domain, vm.vcpus, vm.running,
     vm.agent, vm.agentError || "", vm.cpuKnown, vm.memKnown,
     ips, vm.os || "", vm.kernel || "",
-    (vm.filesystems || []).map(f => f.mountpoint)
+    (vm.filesystems || []).map(f => f.mountpoint),
+    // Structural bits for the expansion panel: which devices exist and
+    // what the agent calls itself. Rates update in place, so they don't
+    // belong here — rebuilding the row on every poll would fight the meters.
+    (vm.disks || []).map(d => d.dev),
+    (vm.nics || []).map(n => n.device),
+    vm.agentVersion || ""
   ]);
 }
 
@@ -924,18 +1127,30 @@ function updateValues(refs, vm) {
       f.totalBytes ? f.usedBytes / f.totalBytes * 100 : 0,
       f.mountpoint + " · " + fmtBytes(f.usedBytes) + " / " + fmtBytes(f.totalBytes));
   });
+  // The panel's numbers move every poll too — re-pour them in place so an
+  // open pouch stays open and its text stays selectable.
+  refs.drivesEl.innerHTML = drivesInner(vm);
+  refs.netEl.innerHTML = networkInner(vm);
+  refs.guestEl.innerHTML = guestInner(vm);
 }
 
-function buildRow(vm) {
+function buildRow(vm, open) {
   const tr = fromHTML(row(vm));
+  const detail = fromHTML(detailHtml(vm, open));
   return {
-    el: tr, sig: sig(vm),
+    el: tr,
+    detailEl: detail,
+    sig: sig(vm),
+    open,
     refs: {
       badge: tr.children[1].firstElementChild,
       cpuMeter: tr.children[2].querySelector(".meter"),
       memMeter: tr.children[3].querySelector(".meter"),
       memVal: tr.children[3].querySelector(".val.sub"),
-      fsMeters: [...tr.children[6].querySelectorAll(".fs .meter")]
+      fsMeters: [...tr.children[6].querySelectorAll(".fs .meter")],
+      drivesEl: detail.querySelector(".mini.drives"),
+      netEl: detail.querySelector(".mini.network"),
+      guestEl: detail.querySelector(".guestline")
     }
   };
 }
@@ -946,7 +1161,10 @@ function frozenSet(store) {
   if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return out;
   const range = sel.getRangeAt(0);
   for (const [, entry] of store) {
-    if (range.intersectsNode(entry.el)) out.add(entry.el);
+    if (range.intersectsNode(entry.el) || range.intersectsNode(entry.detailEl)) {
+      out.add(entry.el);
+      out.add(entry.detailEl);
+    }
   }
   return out;
 }
@@ -960,7 +1178,6 @@ function selectionTouches(el) {
 function renderVMs(vms) {
   const host = document.getElementById("rows");
   const frozen = frozenSet(store);
-  const build = buildRow;
 
   const seen = new Set();
   const ordered = [];
@@ -968,41 +1185,46 @@ function renderVMs(vms) {
     seen.add(vm.domain);
     let entry = store.get(vm.domain);
     if (!entry) {
-      entry = build(vm);
+      entry = buildRow(vm, false);
       store.set(vm.domain, entry);
       host.appendChild(entry.el);
+      host.appendChild(entry.detailEl);
     }
     if (frozen.has(entry.el)) {
-      ordered.push(entry.el);
+      ordered.push(entry);
       continue;
     }
     const next = sig(vm);
     if (entry.sig !== next) {
-      const fresh = build(vm);
+      const fresh = buildRow(vm, entry.open);
       entry.el.replaceWith(fresh.el);
+      entry.detailEl.replaceWith(fresh.detailEl);
       store.set(vm.domain, fresh);
       entry = fresh;
     } else {
       updateValues(entry.refs, vm);
       entry.el.classList.toggle("stopped", !vm.running);
     }
-    ordered.push(entry.el);
+    ordered.push(entry);
   }
   for (const [key, entry] of [...store]) {
     if (!seen.has(key) && !frozen.has(entry.el)) {
       entry.el.remove();
+      entry.detailEl.remove();
       store.delete(key);
     }
   }
+  // Each entry is a pair (main row + detail row); keep them adjacent and in
+  // the running-first order, while frozen (text-selected) entries stay put.
   let prev = null;
-  for (const el of ordered) {
-    if (frozen.has(el)) {
-      prev = el;
-      continue;
+  for (const entry of ordered) {
+    if (entry.el.previousElementSibling !== prev) {
+      host.insertBefore(entry.el, prev ? prev.nextSibling : host.firstChild);
+      host.insertBefore(entry.detailEl, entry.el.nextSibling);
+    } else if (entry.detailEl.previousElementSibling !== entry.el) {
+      host.insertBefore(entry.detailEl, entry.el.nextSibling);
     }
-    if (el.previousElementSibling !== prev)
-      host.insertBefore(el, prev ? prev.nextSibling : host.firstChild);
-    prev = el;
+    prev = entry.detailEl;
   }
   document.getElementById("empty").hidden = store.size > 0;
 }
@@ -1019,6 +1241,7 @@ async function tick() {
       if (a.running !== b.running) return a.running ? -1 : 1;
       return (a.name || "").localeCompare(b.name || "");
     });
+    latestVMs = vms;
 
     renderVMs(vms);
 
@@ -1137,6 +1360,70 @@ authForm.addEventListener("submit", async (e) => {
 });
 
 checkCapabilities();
+
+// --- expansion panel: click a VM name to open its pouch -------------------
+
+document.getElementById("rows").addEventListener("click", (e) => {
+  const cell = e.target.closest(".vmcell");
+  if (!cell) return;
+  const entry = store.get(cell.dataset.domain);
+  if (!entry) return;
+  entry.open = !entry.open;
+  entry.el.classList.toggle("open", entry.open);
+  entry.detailEl.hidden = !entry.open;
+});
+
+// --- raw xml viewer --------------------------------------------------------
+
+const xmlDialog = document.getElementById("xml-dialog");
+const xmlPre = document.getElementById("xml-pre");
+const btnXmlCopy = document.getElementById("xml-copy");
+
+document.getElementById("rows").addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-xml]");
+  if (!btn) return;
+  const domain = btn.dataset.xml;
+  const vm = latestVMs.find(v => v.domain === domain);
+  document.getElementById("xml-vm").textContent = vm ? (vm.hostname || vm.name) : domain;
+  xmlPre.textContent = "loading…";
+  btnXmlCopy.textContent = "copy";
+  xmlDialog.showModal();
+  try {
+    const res = await fetch(`/api/vm/${encodeURIComponent(domain)}/xml`, { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    xmlPre.textContent = await res.text();
+  } catch (err) {
+    xmlPre.textContent = "couldn't load the XML: " + err.message;
+  }
+});
+
+btnXmlCopy.addEventListener("click", () => {
+  if (!(navigator.clipboard && navigator.clipboard.writeText)) return;
+  navigator.clipboard.writeText(xmlPre.textContent).then(() => {
+    btnXmlCopy.textContent = "copied!";
+    setTimeout(() => { btnXmlCopy.textContent = "copy"; }, 1500);
+  }, () => {});
+});
+document.getElementById("xml-close").addEventListener("click", () => xmlDialog.close());
+
+// --- refresh nudge ----------------------------------------------------------
+
+const REFRESH_COOLDOWN_MS = 5000; // mirrors clocks.NudgeInterval
+const btnRefresh = document.getElementById("btn-refresh");
+
+btnRefresh.addEventListener("click", async () => {
+  btnRefresh.disabled = true;
+  try {
+    await fetch("/api/refresh", { method: "POST", cache: "no-store" });
+    const statusEl = document.getElementById("status");
+    if (!selectionTouches(statusEl)) {
+      statusEl.textContent = "refresh requested — fresh data in a moment";
+    }
+  } catch (e) {
+    // an unreachable server is already reported by the next tick
+  }
+  setTimeout(() => { btnRefresh.disabled = false; }, REFRESH_COOLDOWN_MS);
+});
 
 tick();
 setInterval(tick, REFRESH_MS);

@@ -59,7 +59,7 @@ func TestThemeInjection(t *testing.T) {
 	cache := model.NewCache()
 
 	get := func(theme string) string {
-		srv := New(cache, log, theme, "")
+		srv := New(cache, log, theme, "", nil)
 		rec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
 		return rec.Body.String()
