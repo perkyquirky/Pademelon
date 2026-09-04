@@ -29,10 +29,10 @@ Windows and Linux (tested Windows Server 2022 & Ubuntu Server 24.04.4 LTS)
 - IP address & interface ID
 - Host OS - kernel (Linux) / OS build (Windows)
 - Drive partitions & usage
-- Disk & network throughput (host-side — works even without the guest agent)
+- Disk & network throughput
 - Agent version & clock drift per VM
-- Per-VM raw XML viewer
-- Manual refresh button (debounced early poll)
+- VM raw XML viewer
+- Manual refresh button
 - Colour themes — nine built in, pick one in the page header or set the server default with `-theme`
 - Optional token auth — see "Optional auth" below
 
@@ -53,10 +53,14 @@ There is a compose file in the root directory of this repository for you to copy
 
 More example configurations, including auth: [Compose Examples](https://github.com/perkyquirky/Pademelon/blob/main/docker-compose-examples.yaml)
 
-## Optional auth
+## Optional authentication
 
 By default the dashboard is open to anyone who can reach it on the local network.
-Auth is currently not required, this is being implimented prior to the addition of commands that can modify VM's.
+
+Users can view live stats without authenticating. 
+
+Pademelon will soon have features for controlling VM states. As such Auth is being implimented to ensure that people on the local network cannot make changes unauthenticated. The auth system is NOT intended AT ALL for internet facing.
+
 You can use a password of your choosing or generate a random string with:
 
 ```bash
