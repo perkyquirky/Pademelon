@@ -32,12 +32,6 @@ Windows and Linux (tested Windows Server 2022 & Ubuntu Server 24.04.4 LTS)
 - Colour themes — nine built in, pick one in the page header or set the server default with `-theme`
 - Optional token auth — see "Optional auth" below
 
-## Currently unsupported:
-
-- Any write operations e.g:
-  - Stop / restart
-  - Any kind of writing to the VM
-
 ## How to use?
 
 Pademelon requires that you have the QEMU Guest Agent installed in your VM's. 

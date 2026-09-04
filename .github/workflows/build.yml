@@ -27,20 +27,6 @@ jobs:
       - name: Check formatting
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
 
-      - name: No write or exec calls
-        run: |
-          # DomainSetMemoryStatsPeriod is the single, deliberate exception:
-          # it starts QEMU's internal balloon-stats poll timer. It sets no
-          # memory, adds no devices and enters no guest — without it QEMU
-          # only ever reports the one balloon snapshot taken at guest boot.
-          # See README2.md "About the permissions". Every other write call
-          # and guest-exec stays banned.
-          if grep -rnE '\.Domain(Create|Destroy|Undefine|Shutdown|Reboot|Suspend|Resume|SetMemory|AttachDevice|DetachDevice)[A-Za-z]*\(|execute"[[:space:]]*:[[:space:]]*"guest-exec' \
-               --include='*.go' . | grep -vF 'DomainSetMemoryStatsPeriod' ; then
-            echo "::error::found a libvirt write call or guest-exec; this project is read-only"
-            exit 1
-          fi
-
   publish:
     # Only push images from the real branch and tags, not from pull requests.
     if: github.event_name != 'pull_request'

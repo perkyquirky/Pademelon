@@ -1,4 +1,4 @@
-# pademelon — read-only VM dashboard for TrueNAS Scale.
+# pademelon — VM dashboard for TrueNAS Scale.
 
 services:
   pademelon:

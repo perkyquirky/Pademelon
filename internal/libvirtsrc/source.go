@@ -1,10 +1,5 @@
 // Package libvirtsrc talks to libvirt on the TrueNAS host and turns what it
 // finds into model.Snapshot values.
-//
-// Everything in here is read-only. There are no calls that create, destroy,
-// define, undefine or otherwise change a domain, and there must never be —
-// the container holds a read-write libvirt handle purely because guest agent
-// commands are classed as writes, not because it needs to change anything.
 package libvirtsrc
 
 import (

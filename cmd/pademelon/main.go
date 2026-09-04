@@ -1,8 +1,8 @@
-// Command pademelon serves a read-only dashboard of the VMs running on a
+// Command pademelon serves a dashboard of the VMs running on a
 // TrueNAS Scale host.
 //
 // It talks to libvirt over the host's unix socket and to each VM's QEMU guest
-// agent through libvirt. It never changes anything.
+// agent through libvirt.
 package main
 
 import (
