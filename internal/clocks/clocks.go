@@ -96,4 +96,17 @@ const (
 	// arriving sooner than this after the previous poll is dropped, so a
 	// browser hammering the refresh route can't hammer libvirt.
 	NudgeInterval = 5 * time.Second
+
+	// ActionTimeout is the hard wall-clock bound for one submitted action.
+	// Most verbs answer in well under a second; the known slow case is
+	// libvirt's own agent-mode shutdown, which blocked ~58s against a real
+	// Windows guest. The timeout abandons the job (marked timeout) rather
+	// than the request — the underlying libvirt call finishes on its own,
+	// and the next poll tells the truth about the guest either way.
+	ActionTimeout = 10 * time.Second
+
+	// JobRetention is how long finished jobs stay in the registry before
+	// the lazy sweep drops them. Long enough to audit what happened over a
+	// working session; short enough that the map can't grow without bound.
+	JobRetention = time.Hour
 )

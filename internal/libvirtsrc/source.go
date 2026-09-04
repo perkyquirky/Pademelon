@@ -1,5 +1,16 @@
 // Package libvirtsrc talks to libvirt on the TrueNAS host and turns what it
 // finds into model.Snapshot values.
+//
+// Everything in here is read-only. There are no calls that create, destroy,
+// define, undefine or otherwise change a domain, and there must never be —
+// the container holds a read-write libvirt handle purely because guest agent
+// commands are classed as writes, not because it needs to change anything.
+//
+// The one deliberate hand-off: WithConnection lends the live connection to
+// a callback, which is how the action layer (internal/actions) reaches
+// libvirt when -allow-actions is on. No write verbs exist in this package —
+// the interface below only declares names — and the CI allowlist keeps it
+// that way.
 package libvirtsrc
 
 import (
@@ -140,6 +151,40 @@ func New(cfg Config) *Source {
 		lastMemStale:   map[string]bool{},
 		statsPeriodSet: map[string]bool{},
 	}
+}
+
+// ConnSource is everything the action layer needs from the connection
+// owner. *Source implements it; a test fake can too.
+type ConnSource interface {
+	WithConnection(fn func(Domains) error) error
+}
+
+// Domains is the slice of the libvirt connection the action layer is
+// allowed to use. *Libvirt satisfies it. Declared here, next to the
+// connection it borrows, so the borrow never turns into a general-purpose
+// escape hatch — the verbs are enumerated, reviewed and grepped.
+type Domains interface {
+	DomainCreate(d libvirt.Domain) error
+	DomainShutdownFlags(d libvirt.Domain, flags libvirt.DomainShutdownFlagValues) error
+	DomainReboot(d libvirt.Domain, flags libvirt.DomainRebootFlagValues) error
+	DomainDestroy(d libvirt.Domain) error
+	DomainSuspend(d libvirt.Domain) error
+	DomainResume(d libvirt.Domain) error
+	QEMUDomainAgentCommand(d libvirt.Domain, cmd string, timeout int32, flags uint32) (libvirt.OptString, error)
+	ConnectListAllDomains(need int32, flags libvirt.ConnectListAllDomainsFlags) ([]libvirt.Domain, uint32, error)
+}
+
+// WithConnection lends the live connection to fn. Like Poll, it grabs the
+// connection under the lock and then runs fn without it — so a long-running
+// fn (a slow shutdown) does not stall the poll loop. The usual race applies:
+// if libvirt restarts mid-fn the calls fail, which the action layer reports
+// as a failed job. Retrying is the fix, not locking.
+func (s *Source) WithConnection(fn func(Domains) error) error {
+	conn, err := s.connect()
+	if err != nil {
+		return err
+	}
+	return fn(conn)
 }
 
 // Close drops the libvirt connection.

@@ -105,3 +105,36 @@ func TestResolveTokenRejectsEmpty(t *testing.T) {
 		}
 	})
 }
+
+// TestResolveAllowActions pins the flag+env combination for the action
+// switch: the flag is the default, the environment overrides, and a
+// garbage value is an error rather than a silent false. The
+// refuses-without-token rule lives in main and is exercised by the live
+// checklist, since it's two lines of os.Exit.
+func TestResolveAllowActions(t *testing.T) {
+	tests := []struct {
+		name    string
+		flag    bool
+		env     string
+		want    bool
+		wantErr bool
+	}{
+		{name: "flag off, nothing set", want: false},
+		{name: "flag on, nothing set", flag: true, want: true},
+		{name: "env overrides a false flag", env: "1", want: true},
+		{name: "env false beats a true flag", flag: true, env: "false", want: false},
+		{name: "garbage env is an error", env: "yes-please", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PADAMELON_ALLOW_ACTIONS", tc.env)
+			got, err := resolveAllowActions(tc.flag)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err == nil && got != tc.want {
+				t.Errorf("resolveAllowActions = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

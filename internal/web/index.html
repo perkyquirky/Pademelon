@@ -658,6 +658,41 @@ tr.detail > td { padding: 8px 12px 14px 30px; }
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* ---- action menus and confirmations ---- */
+.menu-wrap { position: relative; display: inline-block; }
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  min-width: 180px;
+  background: var(--card);
+  border: 2px solid var(--border-dot);
+  border-radius: 14px;
+  box-shadow: 0 5px 0 var(--shadow);
+  padding: 6px;
+}
+.menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: none;
+  border-radius: 9px;
+  padding: 7px 12px;
+  font-size: 12.5px;
+}
+.menu button:hover { background: var(--accent-soft); }
+.menu button:disabled { opacity: 0.4; cursor: not-allowed; }
+.menu button:disabled:hover { background: none; }
+.menu button.danger { color: var(--bad-tx); font-weight: 700; }
+#confirm-dialog { max-width: 360px; }
+button.btn-danger {
+  background: var(--bad-bg);
+  color: var(--bad-tx);
+  border-color: var(--bad-bg);
+}
+
 .empty {
   padding: 32px;
   text-align: center;
@@ -754,6 +789,7 @@ tr.detail > td { padding: 8px 12px 14px 30px; }
     <div class="masthead-right">
       <span class="status" id="status">loading…</span>
       <div class="controls" role="group" aria-label="Controls">
+        <button id="btn-shutdown-all" hidden title="ask every running VM with an agent to shut down, a second apart">shut down all…</button>
         <button id="btn-refresh" title="ask for a fresh poll right now">refresh</button>
         <label class="ctl">theme
           <select id="theme-select" aria-label="Colour theme">
@@ -838,6 +874,15 @@ tr.detail > td { padding: 8px 12px 14px 30px; }
     <button type="button" id="xml-copy">copy</button>
     <span style="flex:1"></span>
     <button type="button" id="xml-close">close</button>
+  </div>
+</dialog>
+
+<dialog id="confirm-dialog">
+  <h2 class="card-title" id="cf-title"></h2>
+  <p class="auth-hint" id="cf-desc"></p>
+  <div class="auth-row">
+    <button type="button" id="cf-cancel">cancel</button>
+    <button type="button" id="cf-ok"></button>
   </div>
 </dialog>
 
@@ -1029,15 +1074,49 @@ function networkHtml(vm) {
 }
 
 function detailHtml(vm, open) {
+  const power = capsActions ? powerMenuHtml(vm) : "";
   return `<tr class="detail" data-domain="${esc(vm.domain)}"${open ? "" : " hidden"}><td colspan="7">
     <div class="panel">
       <div class="panel-actions">
+        ${power}
         <button data-xml="${esc(vm.domain)}">raw xml</button>
         <span class="guestline"></span>
       </div>
       <div class="grid2">${drivesHtml(vm)}${networkHtml(vm)}</div>
     </div>
   </td></tr>`;
+}
+
+// --- power actions ----------------------------------------------------------
+
+// busyUntil keeps a just-submitted domain's menu greyed out for a few
+// seconds — real spam protection is the server's single-flight; this is
+// so the button doesn't look lied to while the poller catches up.
+const busyUntil = {};
+let capsActions = false;
+
+function jobBusy(domain) {
+  return (busyUntil[domain] || 0) > Date.now();
+}
+
+function powerMenuHtml(vm) {
+  const busy = jobBusy(vm.domain);
+  const running = vm.running && !busy;
+  const stopped = vm.state === "stopped" && !busy;
+  const paused = vm.state === "paused" && !busy;
+  const item = (act, label, enabled, danger, hint) =>
+    `<button class="menu-item ${danger ? "danger" : ""}" data-act="${act}" data-domain="${esc(vm.domain)}" ${enabled ? "" : "disabled"}${hint ? ` title="${esc(hint)}"` : ""}>${label}</button>`;
+  return `<div class="menu-wrap">
+    <button class="menu-btn" aria-haspopup="true" aria-expanded="false">power ▾</button>
+    <div class="menu" hidden>
+      ${item("start", "start", stopped)}
+      ${item("pause", "pause", running)}
+      ${item("resume", "resume", paused)}
+      ${item("reboot", "restart…", running)}
+      ${item("shutdown", "shut down…", running, false, paused ? "ACPI never reaches a paused guest" : "")}
+      ${item("force-off", "force off…", running || paused, true)}
+    </div>
+  </div>`;
 }
 
 function row(vm) {
@@ -1245,7 +1324,7 @@ async function tick() {
 
     renderVMs(vms);
 
-    if (!selectionTouches(statusEl)) {
+    if (Date.now() >= statusHoldUntil && !selectionTouches(statusEl)) {
       if (snap.connected) {
         statusEl.className = "status";
         statusEl.textContent = `${vms.length} VMs · polled ${new Date(snap.polled).toLocaleTimeString()} · ${snap.pollMs} ms`;
@@ -1256,7 +1335,7 @@ async function tick() {
     }
     if (!selectionTouches(footEl)) {
       footEl.textContent =
-        "refreshes every " + (REFRESH_MS / 1000) + "s · made with ♥ (˶ˆᗜˆ˵)";
+        "refreshes every " + (REFRESH_MS / 1000) + "s · " + (capsActions ? "actions enabled" : "read-only") + " · made with ♥ (˶ˆᗜˆ˵)";
     }
   } catch (e) {
     statusEl.className = "status bad";
@@ -1311,8 +1390,11 @@ async function checkCapabilities() {
     const res = await fetch("/api/capabilities", { cache: "no-store" });
     if (!res.ok) return;
     const caps = await res.json();
-    if (!caps.authRequired) return;
+    capsActions = !!caps.actions;
+    if (capsActions) btnShutdownAll.hidden = false;
+    renderVMs(latestVMs); // redraw the panels with or without power menus
     // A previous login may still be valid via the session cookie.
+    if (!caps.authRequired) return;
     const chk = await fetch("/api/auth/check", { cache: "no-store" });
     authOK = chk.ok;
     btnAuth.hidden = false;
@@ -1423,6 +1505,157 @@ btnRefresh.addEventListener("click", async () => {
     // an unreachable server is already reported by the next tick
   }
   setTimeout(() => { btnRefresh.disabled = false; }, REFRESH_COOLDOWN_MS);
+});
+
+// --- power actions ----------------------------------------------------------
+
+// The toast writes to the status pill and holds it for a few seconds, so
+// the next tick doesn't talk over it.
+let statusHoldUntil = 0;
+let toastTimer = null;
+
+function toast(msg) {
+  const statusEl = document.getElementById("status");
+  if (!selectionTouches(statusEl)) statusEl.textContent = msg;
+  statusHoldUntil = Date.now() + 4000;
+  clearTimeout(toastTimer);
+}
+
+const CONFIRMS = {
+  restart:  vm => ({ title: `restart "${vm}"?`, desc: "the VM will reboot. unsaved work may be lost.", label: "restart", danger: false }),
+  shutdown: vm => ({ title: `shut down "${vm}"?`, desc: "the VM gets a graceful shutdown request. unsaved work may be lost.", label: "shut down", danger: false }),
+  "force-off": vm => ({ title: `force off "${vm}"?`, desc: "pulls the power cord. the VM gets no chance to save anything — only for a wedged VM.", label: "force off", danger: true }),
+};
+
+const cfDialog = document.getElementById("confirm-dialog");
+let cfResolve = null;
+let cfOk = false;
+
+function confirmBox(title, desc, label, danger) {
+  document.getElementById("cf-title").textContent = title;
+  document.getElementById("cf-desc").textContent = desc;
+  const ok = document.getElementById("cf-ok");
+  ok.textContent = label;
+  ok.className = danger ? "btn-danger" : "";
+  cfOk = false;
+  cfDialog.showModal();
+  return new Promise(res => { cfResolve = res; });
+}
+
+document.getElementById("cf-ok").addEventListener("click", () => { cfOk = true; cfDialog.close(); });
+document.getElementById("cf-cancel").addEventListener("click", () => cfDialog.close());
+cfDialog.addEventListener("close", () => {
+  if (cfResolve) { cfResolve(cfOk); cfResolve = null; }
+});
+
+// apiSubmit is the action fetch: CSRF header always, 401 opens the login
+// dialog, error bodies are little JSON envelopes with an "error" line.
+async function apiSubmit(path) {
+  const res = await fetch(path, {
+    method: "POST",
+    cache: "no-store",
+    headers: { "X-Requested-With": "pademelon" },
+  });
+  if (res.status === 401) {
+    authOK = false;
+    paintAuth();
+    authDialog.showModal();
+    throw new Error("log in first");
+  }
+  if (!res.ok) {
+    let msg = "HTTP " + res.status;
+    try {
+      const body = await res.json();
+      if (body.error) msg = body.error;
+    } catch (e) { /* non-JSON error body; the HTTP code will do */ }
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+function submitAction(domain, act) {
+  busyUntil[domain] = Date.now() + 8000;
+  renderVMs(latestVMs); // grey the menu out straight away
+  apiSubmit(`/api/vm/${encodeURIComponent(domain)}/${act}`)
+    .then(() => toast(`${act} requested — poller will confirm`))
+    .catch(err => toast(`${act}: ${err.message}`))
+    .finally(() => {
+      // The poll refreshes the row (and the menu) when the state changes;
+      // this redraw just un-greys the menu if the poll already has.
+      setTimeout(() => renderVMs(latestVMs), REFRESH_MS);
+    });
+}
+
+async function handleAction(domain, act) {
+  closeMenus();
+  if (act === "start") { submitAction(domain, act); return; }
+  const c = CONFIRMS[act];
+  if (!c) return;
+  const q = c(domain);
+  if (!(await confirmBox(q.title, q.desc, q.label, q.danger))) return;
+  if (act === "force-off") {
+    const again = await confirmBox(
+      `really force off "${domain}"?`,
+      "second and final warning. this kills the VM immediately — databases and anything mid-write can lose recent work.",
+      "yes, force off", true);
+    if (!again) return;
+  }
+  submitAction(domain, act);
+}
+
+let openMenuEl = null;
+
+function closeMenus() {
+  if (openMenuEl) openMenuEl.hidden = true;
+  openMenuEl = null;
+}
+
+document.getElementById("rows").addEventListener("click", (e) => {
+  const mi = e.target.closest(".menu-item");
+  if (mi) {
+    if (mi.disabled) return;
+    closeMenus();
+    if (mi.dataset.act) handleAction(mi.dataset.domain, mi.dataset.act);
+    return;
+  }
+  const mb = e.target.closest(".menu-btn");
+  if (mb) {
+    const menu = mb.parentElement.querySelector(".menu");
+    if (openMenuEl && openMenuEl !== menu) openMenuEl.hidden = true;
+    menu.hidden = !menu.hidden;
+    openMenuEl = menu.hidden ? null : menu;
+    mb.setAttribute("aria-expanded", String(!menu.hidden));
+    return;
+  }
+  if (e.target.closest(".menu")) return; // clicks inside the menu, not on items
+  if (e.target.closest(".vmcell")) return; // the expand/collapse handler owns these
+});
+
+document.addEventListener("click", e => {
+  if (!e.target.closest(".menu-wrap")) closeMenus();
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") closeMenus();
+});
+
+// --- bulk shut down all ------------------------------------------------------
+
+const btnShutdownAll = document.getElementById("btn-shutdown-all");
+
+btnShutdownAll.addEventListener("click", async () => {
+  if (!(await confirmBox(
+    "shut down all running VMs?",
+    "every running VM with a connected agent gets a graceful shutdown request, staggered a second apart. agentless and paused VMs are left alone — you're the orchestrator.",
+    "shut down all", false))) return;
+  try {
+    const plan = await apiSubmit("/api/actions/shutdown-all");
+    const bits = [];
+    if (plan.planned && plan.planned.length) bits.push("asked: " + plan.planned.join(", "));
+    if (plan.skipped && plan.skipped.length) bits.push("skipped: " + plan.skipped.join(", "));
+    toast(bits.length ? bits.join(" · ") : "nothing to shut down");
+  } catch (err) {
+    toast("shutdown all: " + err.message);
+  }
 });
 
 tick();

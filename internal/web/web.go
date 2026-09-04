@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"time"
 
+	"pademelon/internal/actions"
 	"pademelon/internal/model"
 )
 
@@ -34,33 +35,55 @@ const themePlaceholder = `data-theme="` + DefaultTheme + `"`
 
 // Server wires the cache to HTTP.
 type Server struct {
-	cache *model.Cache
-	log   *slog.Logger
-	theme string
-	auth  authState
-	nudge chan<- struct{}
+	cache   *model.Cache
+	log     *slog.Logger
+	theme   string
+	auth    authState
+	nudge   chan<- struct{}
+	actions ActionSubmitter
 }
 
-// New returns a Server reading from cache. theme is the default colour
+// ActionSubmitter is the slice of the actions store the web layer uses.
+// An interface, so route handlers test without a hypervisor.
+type ActionSubmitter interface {
+	Submit(domain string, action actions.Action) (*actions.Job, error)
+	List() []actions.Job
+	ShutdownAll() (planned []string, skipped []string)
+}
+
+// Config is everything New needs. Zero-value fields behave sanely: an
+// empty theme falls back to the default, an empty token disables auth, and
+// a nil Actions disables every action route.
+type Config struct {
+	Cache   *model.Cache
+	Log     *slog.Logger
+	Theme   string
+	Token   string
+	Nudge   chan<- struct{}
+	Actions ActionSubmitter
+}
+
+// New returns a Server reading from cache. The theme is the default colour
 // theme sent to browsers that haven't picked one themselves; validate it
-// with ValidTheme before calling. An empty authToken disables auth
-// entirely — the private tier (currently /api/auth/check, later the action
-// routes) is not even registered without one. nudge is the channel the
-// refresh route pokes to ask the poll loop for an early poll; nil disables
-// the poke (tests pass nil).
-func New(cache *model.Cache, log *slog.Logger, theme, authToken string, nudge chan<- struct{}) *Server {
-	if log == nil {
-		log = slog.Default()
+// with ValidTheme before calling. An empty token disables auth entirely —
+// the private tier is not even registered without one. Nudge is the
+// channel the refresh route pokes; nil disables the poke. Actions is the
+// action job store; nil keeps every action route unregistered, which is
+// how a read-only deployment stays verifiably read-only at runtime.
+func New(cfg Config) *Server {
+	if cfg.Log == nil {
+		cfg.Log = slog.Default()
 	}
-	if theme == "" {
-		theme = DefaultTheme
+	if cfg.Theme == "" {
+		cfg.Theme = DefaultTheme
 	}
 	return &Server{
-		cache: cache,
-		log:   log,
-		theme: theme,
-		auth:  authState{token: authToken, failures: make(map[string]*authFailure)},
-		nudge: nudge,
+		cache:   cfg.Cache,
+		log:     cfg.Log,
+		theme:   cfg.Theme,
+		auth:    authState{token: cfg.Token, failures: make(map[string]*authFailure)},
+		nudge:   cfg.Nudge,
+		actions: cfg.Actions,
 	}
 }
 
@@ -73,6 +96,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/refresh", s.handleRefresh)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/capabilities", s.handleCapabilities)
+	if s.actions != nil {
+		mux.Handle("POST /api/vm/{name}/{action}", s.requireToken(csrfGuard(http.HandlerFunc(s.handleSubmitAction))))
+		mux.Handle("POST /api/actions/shutdown-all", s.requireToken(csrfGuard(http.HandlerFunc(s.handleShutdownAll))))
+		mux.Handle("GET /api/actions", s.requireToken(http.HandlerFunc(s.handleJobs)))
+	}
 	if s.auth.token != "" {
 		mux.Handle("GET /api/auth/check", s.requireToken(http.HandlerFunc(s.handleAuthCheck)))
 		mux.Handle("GET /api/auth/logout", s.requireToken(http.HandlerFunc(s.handleAuthLogout)))

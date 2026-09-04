@@ -32,7 +32,7 @@ func TestXMLRouteServesSnapshotCopy(t *testing.T) {
 			{Domain: "9_no_xml", XML: ""},
 		},
 	})
-	s := New(cache, discardLogger(), DefaultTheme, "", nil)
+	s := New(Config{Cache: cache, Log: discardLogger(), Theme: DefaultTheme})
 
 	code, _, body := doGetBody(s, "/api/vm/7_web/xml", nil)
 	if code != http.StatusOK {
@@ -59,7 +59,7 @@ func TestXMLRouteServesSnapshotCopy(t *testing.T) {
 // and doesn't panic when no channel was wired (tests pass nil).
 func TestRefreshRoutePokesNudge(t *testing.T) {
 	nudge := make(chan struct{}, 1)
-	s := New(model.NewCache(), discardLogger(), DefaultTheme, "", nudge)
+	s := New(Config{Cache: model.NewCache(), Log: discardLogger(), Theme: DefaultTheme, Nudge: nudge})
 
 	req := httptestRequest("POST", "/api/refresh")
 	rec := httptest.NewRecorder()
@@ -97,7 +97,7 @@ func TestRefreshRoutePokesNudge(t *testing.T) {
 	}
 
 	// No channel wired: still 200, no panic, no poke anywhere.
-	sNoNudge := New(model.NewCache(), discardLogger(), DefaultTheme, "", nil)
+	sNoNudge := New(Config{Cache: model.NewCache(), Log: discardLogger(), Theme: DefaultTheme})
 	rec = httptest.NewRecorder()
 	sNoNudge.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -107,18 +107,25 @@ func TestRefreshRoutePokesNudge(t *testing.T) {
 
 // TestPageMarkupSyncWithRoutes keeps the page's fetches pointing at the
 // routes that exist, in the spirit of TestAuthMarkupSyncWithPage: the
-// expansion panel's XML viewer and the refresh button must never drift
-// away from the server.
+// expansion panel's XML viewer, the refresh button, the CSRF header and
+// the action affordances must never drift away from the server.
 func TestPageMarkupSyncWithRoutes(t *testing.T) {
 	page := string(indexHTML)
 
 	for _, want := range []string{
 		`fetch("/api/refresh"`,
 		"/api/vm/",
+		`"X-Requested-With": "pademelon"`,
+		`/api/vm/${encodeURIComponent(domain)}/`,
+		`/api/actions/shutdown-all`,
 		`id="btn-refresh"`,
+		`id="btn-shutdown-all"`,
 		`id="xml-dialog"`,
+		`id="confirm-dialog"`,
 		`class="vmcell"`,
 		`class="detail"`,
+		`class="menu-btn"`,
+		`caps.actions`,
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("index.html missing %q", want)

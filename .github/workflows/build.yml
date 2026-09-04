@@ -26,6 +26,35 @@ jobs:
       - run: go test ./...
       - name: Check formatting
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: Write calls stay inside internal/actions
+        run: |
+          # Actions exist now, so the old "no write calls anywhere" rule
+          # became a zone rule: libvirt write verbs are only allowed inside
+          # internal/actions, where every verb is on a reviewed allowlist.
+          # guest-exec is still banned everywhere, no exceptions.
+          # 1. Outside internal/actions: every write verb fails, except the
+          #    balloon-stats knob (DomainSetMemoryStatsPeriod), which sets
+          #    no memory and enters no guest — see README2 "About the
+          #    permissions".
+          if grep -rnE '\.Domain(Create|Destroy|Undefine|Shutdown|Reboot|Suspend|Resume|SetMemory|AttachDevice|DetachDevice)[A-Za-z]*\(' \
+               --include='*.go' . | grep -v './internal/actions/' | grep -vF 'DomainSetMemoryStatsPeriod' ; then
+            echo "::error::found a libvirt write call outside internal/actions"
+            exit 1
+          fi
+          # 2. Inside internal/actions: every .Domain* call must be one of
+          #    the six reviewed verbs. A new verb means a PR note, not a
+          #    quiet addition.
+          if grep -rnE '\.Domain[A-Z][A-Za-z]*\(' --include='*.go' ./internal/actions | \
+               grep -vE '\.(DomainCreate|DomainShutdownFlags|DomainReboot|DomainDestroy|DomainSuspend|DomainResume)\(' ; then
+            echo "::error::internal/actions called a verb outside the reviewed allowlist"
+            exit 1
+          fi
+          # 3. guest-exec: remote code execution into the guests. Stays
+          #    banned everywhere, permanently (IDEAS-EXPLORED.md §4).
+          if grep -rnE 'execute"[[:space:]]*:[[:space:]]*"guest-exec' --include='*.go' . ; then
+            echo "::error::found guest-exec; that is a hard no"
+            exit 1
+          fi
 
   publish:
     # Only push images from the real branch and tags, not from pull requests.

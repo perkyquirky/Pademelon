@@ -29,10 +29,11 @@ Windows and Linux (tested Windows Server 2022 & Ubuntu Server 24.04.4 LTS)
 - IP address & interface ID
 - Host OS - kernel (Linux) / OS build (Windows)
 - Drive partitions & usage
-- Disk & network throughput (host-side — works even without the guest agent)
+- Disk & network throughput
 - Agent version & clock drift per VM
-- Per-VM raw XML viewer
-- Manual refresh button (debounced early poll)
+- VM raw XML viewer
+- Manual refresh button
+- VM power actions — start, shutdown, reboot, force off, pause, resume, and a bulk "shut down all" — behind `-allow-actions` **and** a token, both required; see the auth section below
 - Colour themes — nine built in, pick one in the page header or set the server default with `-theme`
 - Optional token auth — see "Optional auth" below
 
@@ -53,10 +54,19 @@ There is a compose file in the root directory of this repository for you to copy
 
 More example configurations, including auth: [Compose Examples](https://github.com/perkyquirky/Pademelon/blob/main/docker-compose-examples.yaml)
 
-## Optional auth
+## Optional authentication
 
 By default the dashboard is open to anyone who can reach it on the local network.
-Auth is currently not required, this is being implimented prior to the addition of commands that can modify VM's.
+
+Users can view live stats without authenticating. 
+
+Controlling VM states (start, shutdown, reboot, force off, pause, resume, bulk
+"shut down all") needs **both** a token and the `-allow-actions` switch. Set
+`PADAMELON_ALLOW_ACTIONS=true` and the token together, or Pademelon refuses to
+start with action routes on and no token — buttons that stop VMs never exist
+unauthenticated. Without the flag, the dashboard stays fully read-only. The
+auth system is NOT intended AT ALL for internet facing.
+
 You can use a password of your choosing or generate a random string with:
 
 ```bash
@@ -78,6 +88,8 @@ services:
     environment:
       # Generate with: openssl rand -hex 32 or use a password of your choice. 
       - PADAMELON_TOKEN=change-me-to-your-generated-token
+      # Uncomment to unlock the VM power actions (requires the token above):
+      # - PADAMELON_ALLOW_ACTIONS=true
     volumes:
       - /run/truenas_libvirt:/run/truenas_libvirt
     user: "0:0"
