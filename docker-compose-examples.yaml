@@ -54,14 +54,13 @@ services:
       - "-socket=/run/truenas_libvirt/libvirt-sock"
 
 # ---------------------------------------------------------------
-# Optional token auth — Planned usage for later to allow for VM 
-# commands to be issued. This is required to ensure that no one
-# on the local network can make changes to VM's without
-# authentication. This is NOT a valid security measure for 
-# internet facing traffic. 
+# Token auth — required for the VM power actions, optional otherwise.
+# This ensures no one on the local network can make changes to VM's
+# without authentication. This is NOT a valid security measure for
+# internet facing traffic.
 #
 # Generate a token with:  openssl rand -hex 32
-# or use a password of your choosing. 
+# or use a password of your choosing.
 #
 # Two ways to hand it to the container:
 #
@@ -80,6 +79,42 @@ services:
 # days via a HttpOnly, SameSite=Lax cookie. "log out" clears it. Rotating
 # the token logs every browser out at once.
 # ---------------------------------------------------------------
+#
+# ---------------------------------------------------------------
+# VM power actions — start, shutdown, reboot, force off, pause,
+# resume, and a bulk "shut down all". These need BOTH the token
+# above AND the switch below:
+#
+#    - PADAMELON_ALLOW_ACTIONS=true
+#
+# The container refuses to start with actions enabled and no token —
+# buttons that stop VMs never exist unauthenticated. Without the switch,
+# the dashboard is fully read-only (no action routes exist at all).
+# Actions are queued as jobs and run in the background; the dashboard
+# says "requested", and the poller confirms the result.
+# ---------------------------------------------------------------
+
+# Full example with actions enabled — copy these lines into your
+# service block if you want the power buttons:
+
+# services:
+#   pademelon:
+#     image: ghcr.io/perkyquirky/pademelon:latest
+#     container_name: pademelon
+#     restart: unless-stopped
+#
+#     ports:
+#       - "8088:8088"
+#
+#     volumes:
+#       - /run/truenas_libvirt:/run/truenas_libvirt
+#     user: "0:0"
+#
+#     environment:
+#       # Required for actions. Generate with: openssl rand -hex 32
+#       - PADAMELON_TOKEN=change-me-to-your-generated-token
+#       # Unlocks the power actions. Needs the token above.
+#       - PADAMELON_ALLOW_ACTIONS=true
 
 secrets:
   pademelon_token:

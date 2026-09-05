@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"reflect"
 	"time"
 
 	"pademelon/internal/actions"
@@ -76,6 +77,15 @@ func New(cfg Config) *Server {
 	}
 	if cfg.Theme == "" {
 		cfg.Theme = DefaultTheme
+	}
+	// A typed-nil pointer (a nil *Store inside the interface) is the
+	// classic Go trap: the interface isn't nil, so the routes register,
+	// and calling through them panics. Seen live in production — treat
+	// any nil-backed submitter as disabled.
+	if cfg.Actions != nil {
+		if v := reflect.ValueOf(cfg.Actions); v.Kind() == reflect.Ptr && v.IsNil() {
+			cfg.Actions = nil
+		}
 	}
 	return &Server{
 		cache:   cfg.Cache,

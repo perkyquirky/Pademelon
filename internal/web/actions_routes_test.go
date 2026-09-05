@@ -84,6 +84,23 @@ func TestActionRoutesUnregisteredWithoutActions(t *testing.T) {
 	}
 }
 
+func TestTypedNilStoreCountsAsDisabled(t *testing.T) {
+	// Regression: a nil *Store inside the interface used to register
+	// routes that panicked on use — capabilities even claimed actions were
+	// on. A typed-nil must count as fully disabled, same as untyped nil.
+	var typedNil *actions.Store
+	s := New(Config{Cache: model.NewCache(), Log: discardLogger(), Theme: DefaultTheme, Actions: typedNil})
+
+	code, _, body := doGetBody(s, "/api/capabilities", nil)
+	if code != http.StatusOK || !strings.Contains(body, `"actions": false`) {
+		t.Errorf("capabilities with typed-nil store = %d %s, want actions false", code, body)
+	}
+	rec := post(s, "/api/vm/14_alpine_test/shutdown", "", true)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("action route with typed-nil store = %d, want 405 (unregistered)", rec.Code)
+	}
+}
+
 func TestActionRoutesRequireToken(t *testing.T) {
 	s := newActionsTestServer("tok-123", &fakeActions{})
 

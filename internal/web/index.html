@@ -1577,7 +1577,26 @@ function submitAction(domain, act) {
   busyUntil[domain] = Date.now() + 8000;
   renderVMs(latestVMs); // grey the menu out straight away
   apiSubmit(`/api/vm/${encodeURIComponent(domain)}/${act}`)
-    .then(() => toast(`${act} requested — poller will confirm`))
+    .then(job => {
+      toast(`${act} requested — poller will confirm`);
+      // A job can still fail after its 202 (stale snapshot, dead agent).
+      // Without this peek, a failed action looks like "nothing happened",
+      // which is exactly what a dashboard should never say.
+      setTimeout(async () => {
+        try {
+          const res = await fetch("/api/actions", {
+            cache: "no-store",
+            headers: { "X-Requested-With": "pademelon" },
+          });
+          if (!res.ok) return;
+          const body = await res.json();
+          const j = (body.jobs || []).find(x => x.id === job.id);
+          if (j && (j.state === "failed" || j.state === "timeout")) {
+            toast(`${act} failed: ${j.detail || j.state}`);
+          }
+        } catch (e) { /* the next poll tells the truth anyway */ }
+      }, 3000);
+    })
     .catch(err => toast(`${act}: ${err.message}`))
     .finally(() => {
       // The poll refreshes the row (and the menu) when the state changes;

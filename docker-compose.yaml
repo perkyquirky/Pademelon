@@ -13,6 +13,18 @@ services:
       - /run/truenas_libvirt:/run/truenas_libvirt
     user: "0:0"
 
+    environment:
+      # Optional: token for the private routes (job history, actions).
+      # If you want read only stats comment out PADEMELON_TOKEN and PADAMELON_ALLOW_ACTIONS
+      # Generate one with: openssl rand -hex 32
+      - PADAMELON_TOKEN=change-me-to-your-generated-token
+      #
+      # Optional: unlock the VM power actions (start, shutdown, reboot,
+      # force off, pause, resume, shut down all). Requires the token above —
+      # the container refuses to start with actions on and no token.
+      # Without this, the dashboard is fully read-only.
+      - PADAMELON_ALLOW_ACTIONS=true
+
     # Everything below is optional; these are the defaults.
     # command:
     #   - "-theme=dracula"

@@ -142,7 +142,12 @@ func main() {
 	})
 	defer src.Close()
 
-	var actionStore *actions.Store
+	// Typed-nil trap: declaring this as *actions.Store would put a nil
+	// pointer inside a non-nil interface when actions are off — web would
+	// then register routes that panic on use (seen live: capabilities said
+	// "actions: true" while the startup log said disabled). The interface
+	// type keeps "off" a real nil.
+	var actionStore web.ActionSubmitter
 	if actionsOn {
 		actionStore = actions.New(actions.Config{
 			Log:          log,
