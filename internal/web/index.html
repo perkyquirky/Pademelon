@@ -683,8 +683,6 @@ tr.detail > td { padding: 8px 12px 14px 30px; }
   font-size: 12.5px;
 }
 .menu button:hover { background: var(--accent-soft); }
-.menu button:disabled { opacity: 0.4; cursor: not-allowed; }
-.menu button:disabled:hover { background: none; }
 .menu button.danger { color: var(--bad-tx); font-weight: 700; }
 #confirm-dialog { max-width: 360px; }
 button.btn-danger {
@@ -1089,32 +1087,23 @@ function detailHtml(vm, open) {
 
 // --- power actions ----------------------------------------------------------
 
-// busyUntil keeps a just-submitted domain's menu greyed out for a few
-// seconds — real spam protection is the server's single-flight; this is
-// so the button doesn't look lied to while the poller catches up.
-const busyUntil = {};
+// The menu doesn't police states — you're the orchestrator. Invalid
+// combinations get a clear refusal from the server (and the toast tells
+// you why), and force off is always there as the un-wedge button.
 let capsActions = false;
 
-function jobBusy(domain) {
-  return (busyUntil[domain] || 0) > Date.now();
-}
-
 function powerMenuHtml(vm) {
-  const busy = jobBusy(vm.domain);
-  const running = vm.running && !busy;
-  const stopped = vm.state === "stopped" && !busy;
-  const paused = vm.state === "paused" && !busy;
-  const item = (act, label, enabled, danger, hint) =>
-    `<button class="menu-item ${danger ? "danger" : ""}" data-act="${act}" data-domain="${esc(vm.domain)}" ${enabled ? "" : "disabled"}${hint ? ` title="${esc(hint)}"` : ""}>${label}</button>`;
+  const item = (act, label, danger) =>
+    `<button class="menu-item ${danger ? "danger" : ""}" data-act="${act}" data-domain="${esc(vm.domain)}">${label}</button>`;
   return `<div class="menu-wrap">
     <button class="menu-btn" aria-haspopup="true" aria-expanded="false">power ▾</button>
     <div class="menu" hidden>
-      ${item("start", "start", stopped)}
-      ${item("pause", "pause", running)}
-      ${item("resume", "resume", paused)}
-      ${item("reboot", "restart…", running)}
-      ${item("shutdown", "shut down…", running, false, paused ? "ACPI never reaches a paused guest" : "")}
-      ${item("force-off", "force off…", running || paused, true)}
+      ${item("start", "start")}
+      ${item("pause", "pause")}
+      ${item("resume", "resume")}
+      ${item("reboot", "restart…")}
+      ${item("shutdown", "shut down…")}
+      ${item("force-off", "force off…", true)}
     </div>
   </div>`;
 }
@@ -1522,7 +1511,7 @@ function toast(msg) {
 }
 
 const CONFIRMS = {
-  restart:  vm => ({ title: `restart "${vm}"?`, desc: "the VM will reboot. unsaved work may be lost.", label: "restart", danger: false }),
+  restart:  vm => ({ title: `restart "${vm}"?`, desc: "the VM will shut down cleanly, then start again. unsaved work may be lost.", label: "restart", danger: false }),
   shutdown: vm => ({ title: `shut down "${vm}"?`, desc: "the VM gets a graceful shutdown request. unsaved work may be lost.", label: "shut down", danger: false }),
   "force-off": vm => ({ title: `force off "${vm}"?`, desc: "pulls the power cord. the VM gets no chance to save anything — only for a wedged VM.", label: "force off", danger: true }),
 };
@@ -1574,8 +1563,6 @@ async function apiSubmit(path) {
 }
 
 function submitAction(domain, act) {
-  busyUntil[domain] = Date.now() + 8000;
-  renderVMs(latestVMs); // grey the menu out straight away
   apiSubmit(`/api/vm/${encodeURIComponent(domain)}/${act}`)
     .then(job => {
       toast(`${act} requested — poller will confirm`);
@@ -1597,12 +1584,7 @@ function submitAction(domain, act) {
         } catch (e) { /* the next poll tells the truth anyway */ }
       }, 3000);
     })
-    .catch(err => toast(`${act}: ${err.message}`))
-    .finally(() => {
-      // The poll refreshes the row (and the menu) when the state changes;
-      // this redraw just un-greys the menu if the poll already has.
-      setTimeout(() => renderVMs(latestVMs), REFRESH_MS);
-    });
+    .catch(err => toast(`${act}: ${err.message}`));
 }
 
 async function handleAction(domain, act) {

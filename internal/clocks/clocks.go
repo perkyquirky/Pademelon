@@ -109,4 +109,12 @@ const (
 	// the lazy sweep drops them. Long enough to audit what happened over a
 	// working session; short enough that the map can't grow without bound.
 	JobRetention = time.Hour
+
+	// RebootTimeout bounds the wait phase of a reboot job: after the
+	// shutdown request, the job polls the guest state until it is actually
+	// off before starting it again. Real guests vary wildly here — a
+	// Windows guest once sat "in shutdown" for two whole minutes — so the
+	// bound is generous. A job that exceeds it ends as timeout with
+	// instructions rather than leaving a half-rebooted VM.
+	RebootTimeout = 3 * time.Minute
 )

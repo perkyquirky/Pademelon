@@ -128,9 +128,10 @@ func main() {
 
 	cache := model.NewCache()
 
-	// The web layer can nudge the poll loop for an early poll (refresh
-	// button, later the post-action poke). One slot, non-blocking: a nudge
-	// arriving while one is already pending is dropped, not queued.
+	// Everything that wants an early poll knocks on this channel: the web
+	// layer's refresh button, finished action jobs, and agent lifecycle
+	// events. One slot, non-blocking: a nudge arriving while one is already
+	// pending is dropped, not queued.
 	nudge := make(chan struct{}, 1)
 
 	src := libvirtsrc.New(libvirtsrc.Config{
@@ -139,6 +140,16 @@ func main() {
 		StatsPeriod:  *statsPeriod,
 		Concurrency:  *concurrency,
 		Log:          log,
+		// Agent lifecycle events poke the same debounced channel: libvirt
+		// pushes a channel state change, we poll early to confirm it. The
+		// poller stays the only writer of the cache — the event is a hint
+		// that makes the poller hurry, nothing more.
+		Notify: func() {
+			select {
+			case nudge <- struct{}{}:
+			default:
+			}
+		},
 	})
 	defer src.Close()
 
@@ -187,10 +198,11 @@ func main() {
 }
 
 // pollLoop polls straight away, then on the interval, until ctx is done.
-// A nudge on the channel asks for an early poll — the refresh button uses
-// it, and later phases will too. Nudges are debounced: one arriving sooner
-// than clocks.NudgeInterval after the previous poll is dropped, so a
-// browser hammering the refresh route can't hammer libvirt.
+// A nudge on the channel asks for an early poll — the refresh button,
+// finished action jobs and agent lifecycle events all use it. Nudges are
+// debounced: one arriving sooner than clocks.NudgeInterval after the
+// previous poll is dropped, so a browser hammering the refresh route (or an
+// agent bouncing during a guest boot) can't hammer libvirt.
 //
 // A failed poll is not fatal: the cache keeps the last good data and marks it
 // stale, and the next tick tries to reconnect. libvirtd restarting or the NAS

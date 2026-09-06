@@ -79,18 +79,25 @@ var (
 	ErrInvalidState  = errors.New("invalid state for action")
 	ErrInFlight      = errors.New("action already in flight")
 	ErrUnknownAction = errors.New("unknown action")
+
+	// ErrGuestNotStopped marks a reboot whose guest never powered off
+	// within the bound — the job's state reads timeout rather than failed,
+	// because nothing broke; the guest simply took too long.
+	ErrGuestNotStopped = errors.New("guest did not stop in time")
 )
 
 // Config is what the store needs from main.
 type Config struct {
-	Log          *slog.Logger
-	Snapshot     func() model.Snapshot // what the poller last saw
-	Conn         libvirtsrc.ConnSource // borrowed libvirt connection
-	Nudge        chan<- struct{}       // poked when a job finishes
-	AgentTimeout time.Duration         // matches -agent-timeout
-	Timeout      time.Duration         // per-job wall clock bound; defaults to clocks.ActionTimeout
-	Now          func() time.Time      // injectable clock for tests
-	NewID        func() string         // injectable id source for tests
+	Log           *slog.Logger
+	Snapshot      func() model.Snapshot // what the poller last saw
+	Conn          libvirtsrc.ConnSource // borrowed libvirt connection
+	Nudge         chan<- struct{}       // poked when a job finishes
+	AgentTimeout  time.Duration         // matches -agent-timeout
+	Timeout       time.Duration         // per-job wall clock bound; defaults to clocks.ActionTimeout
+	RebootTimeout time.Duration         // shutdown-then-start wait bound; defaults to clocks.RebootTimeout
+	WaitPoll      time.Duration         // reboot's guest-state poll interval; defaults to 2s (injectable for tests)
+	Now           func() time.Time      // injectable clock for tests
+	NewID         func() string         // injectable id source for tests
 }
 
 // Store is the job registry: an in-memory map with a mutex, single-flight
@@ -118,6 +125,12 @@ func New(cfg Config) *Store {
 	}
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = clocks.ActionTimeout
+	}
+	if cfg.RebootTimeout <= 0 {
+		cfg.RebootTimeout = clocks.RebootTimeout
+	}
+	if cfg.WaitPoll <= 0 {
+		cfg.WaitPoll = 2 * time.Second
 	}
 	return &Store{cfg: cfg, jobs: map[string]*Job{}}
 }
@@ -281,12 +294,20 @@ func (s *Store) run(job *Job) {
 	}()
 
 	var err error
+	// A reboot includes the wait-for-shutdown phase. Its outer bound gets a
+	// minute of slack over the reboot's own deadline so the specific
+	// "guest did not power off" message wins the race against this
+	// catch-all timer, not the other way round.
+	bound := s.cfg.Timeout
+	if job.Action == ActionReboot {
+		bound = s.cfg.RebootTimeout + time.Minute
+	}
 	select {
 	case err = <-done:
-	case <-time.After(s.cfg.Timeout):
+	case <-time.After(bound):
 		s.mu.Lock()
 		job.State = StateTimeout
-		job.Detail = fmt.Sprintf("exceeded the %s action bound; the underlying call was abandoned and the next poll tells the truth", s.cfg.Timeout)
+		job.Detail = fmt.Sprintf("exceeded the %s action bound; the underlying call was abandoned and the next poll tells the truth", bound)
 		s.mu.Unlock()
 		s.finish(job)
 		return
@@ -295,6 +316,9 @@ func (s *Store) run(job *Job) {
 	s.mu.Lock()
 	if err != nil {
 		job.State = StateFailed
+		if errors.Is(err, ErrGuestNotStopped) {
+			job.State = StateTimeout
+		}
 		job.Detail = err.Error()
 	} else {
 		job.State = StateOK
@@ -332,9 +356,7 @@ func (s *Store) execute(doms libvirtsrc.Domains, job *Job) error {
 	case ActionResume:
 		return doms.DomainResume(dom)
 	case ActionReboot:
-		// The guest agent has no reboot command, so this is ACPI to the
-		// guest OS — same event the power button sends.
-		return doms.DomainReboot(dom, libvirt.DomainRebootAcpiPowerBtn)
+		return s.reboot(doms, dom, job)
 	case ActionForceOff:
 		// The power cord. The confirm dialog already made the human say it
 		// twice; the job just does it.
@@ -344,6 +366,39 @@ func (s *Store) execute(doms libvirtsrc.Domains, job *Job) error {
 	default:
 		return fmt.Errorf("unknown action %q", job.Action)
 	}
+}
+
+// reboot is the only reliable "restart" there is: there is no guest-agent
+// reboot command, and the ACPI power button means whatever the guest's OS
+// decides it means (Windows defaults to shut down; our Alpine test guest
+// ignored it entirely). So do what TrueNAS middleware itself does — shut
+// down gracefully, wait for the guest to actually stop, then start it
+// again. If the guest never stops, the job ends as a timeout with
+// instructions and the VM is left untouched rather than half-rebooted.
+func (s *Store) reboot(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) error {
+	if err := s.shutdown(doms, dom, job.Domain); err != nil {
+		return fmt.Errorf("shutdown phase: %w", err)
+	}
+
+	deadline := s.cfg.Now().Add(s.cfg.RebootTimeout)
+	for {
+		state, _, _, _, _, err := doms.DomainGetInfo(dom)
+		if err != nil {
+			return fmt.Errorf("waiting for shutdown: %w", err)
+		}
+		if libvirt.DomainState(state) == libvirt.DomainShutoff {
+			break
+		}
+		if s.cfg.Now().After(deadline) {
+			return fmt.Errorf("%w within %s — force off or start it manually", ErrGuestNotStopped, s.cfg.RebootTimeout)
+		}
+		time.Sleep(s.cfg.WaitPoll)
+	}
+
+	if err := doms.DomainCreate(dom); err != nil {
+		return fmt.Errorf("guest stopped but start failed: %w", err)
+	}
+	return nil
 }
 
 // shutdown is graceful, with the fallback ladder from the live tests:
@@ -423,7 +478,7 @@ func (s *Store) detailFor(job *Job) string {
 	case ActionShutdown:
 		return "shutdown requested — the guest decides how fast"
 	case ActionReboot:
-		return "reboot requested"
+		return "reboot complete — the guest shut down and was started again"
 	case ActionStart, ActionPause, ActionResume:
 		return string(job.Action) + " requested"
 	case ActionForceOff:

@@ -2,8 +2,11 @@ package libvirtsrc
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -177,5 +180,140 @@ func TestNewWarnsWhenStatsPeriodNearStaleness(t *testing.T) {
 					tt.statsPeriod, got, tt.wantWarn, buf.String())
 			}
 		})
+	}
+}
+
+// agentEventMsg builds the message shape go-libvirt delivers for
+// VIR_DOMAIN_EVENT_ID_AGENT_LIFECYCLE.
+func agentEventMsg(id int32, state libvirt.ConnectDomainEventAgentLifecycleState) *libvirt.DomainEventCallbackAgentLifecycleMsg {
+	return &libvirt.DomainEventCallbackAgentLifecycleMsg{
+		Dom:   libvirt.Domain{ID: id, Name: "7_test"},
+		State: int32(state),
+	}
+}
+
+// waitUntil polls fn until it passes or the deadline runs out, so tests
+// that hand work to a goroutine don't guess at sleep durations.
+func waitUntil(t *testing.T, fn func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("condition not met within 2s")
+}
+
+func TestHandleAgentEventHintsAndNotifies(t *testing.T) {
+	var calls int32
+	s := New(Config{Notify: func() { atomic.AddInt32(&calls, 1) }})
+
+	// Two events for the same domain: the hint map must hold one entry
+	// (overwrite, never accumulate) while every event gets its nudge — the
+	// poll loop's debounce is what caps the rate, not this bookkeeping.
+	s.handleAgentEvent(agentEventMsg(7, libvirt.ConnectDomainEventAgentLifecycleStateConnected))
+	s.handleAgentEvent(agentEventMsg(7, libvirt.ConnectDomainEventAgentLifecycleStateDisconnected))
+
+	s.mu.Lock()
+	n := len(s.agentEvents)
+	s.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("hint map holds %d entries, want 1 (overwritten per domain)", n)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("notify calls = %d, want 2 (one per event)", got)
+	}
+}
+
+func TestHandleAgentEventWithoutNotify(t *testing.T) {
+	// A Source built without Notify must not panic on an event — the drain
+	// goroutine can deliver one before main wires anything, in principle.
+	s := New(Config{})
+	s.handleAgentEvent(agentEventMsg(3, libvirt.ConnectDomainEventAgentLifecycleStateConnected))
+}
+
+func TestConsumeAgentEventClearsHint(t *testing.T) {
+	s := New(Config{})
+	if _, ok := s.consumeAgentEvent(3); ok {
+		t.Fatal("consume on an empty map should miss")
+	}
+
+	at := time.Now()
+	s.mu.Lock()
+	s.agentEvents[3] = at
+	s.mu.Unlock()
+
+	got, ok := s.consumeAgentEvent(3)
+	if !ok || !got.Equal(at) {
+		t.Fatalf("consume = (%v, %v), want (%v, true)", got, ok, at)
+	}
+	if _, ok := s.consumeAgentEvent(3); ok {
+		t.Fatal("hint should be cleared after the first consume")
+	}
+}
+
+func TestStartAgentEventsDeliversAndStopSilences(t *testing.T) {
+	var calls int32
+	s := New(Config{Notify: func() { atomic.AddInt32(&calls, 1) }})
+
+	ch := make(chan interface{}, 4)
+	s.subscribe = func(ctx context.Context, l *libvirt.Libvirt) (<-chan interface{}, error) {
+		return ch, nil
+	}
+	s.startAgentEvents(nil)
+
+	ch <- agentEventMsg(5, libvirt.ConnectDomainEventAgentLifecycleStateConnected)
+	waitUntil(t, func() bool { return atomic.LoadInt32(&calls) == 1 })
+
+	s.stopAgentEvents()
+	// cancel() closes the context before it returns, so the drain
+	// goroutine's select has surely seen it by the time these sleeps are
+	// over; the point is "no deliveries after stop", not a timing guarantee.
+	time.Sleep(100 * time.Millisecond)
+	ch <- agentEventMsg(5, libvirt.ConnectDomainEventAgentLifecycleStateDisconnected)
+	time.Sleep(100 * time.Millisecond)
+
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("notify calls = %d, want 1 — events must stop with the subscription", got)
+	}
+}
+
+func TestStartAgentEventsSubscribeFailureWarnsOnce(t *testing.T) {
+	var buf bytes.Buffer
+	s := New(Config{
+		Log:    slog.New(slog.NewTextHandler(&buf, nil)),
+		Notify: func() {},
+	})
+	s.subscribe = func(ctx context.Context, l *libvirt.Libvirt) (<-chan interface{}, error) {
+		return nil, errors.New("boom")
+	}
+
+	s.startAgentEvents(nil)
+	if !strings.Contains(buf.String(), "lifecycle events unavailable") {
+		t.Fatalf("first failure should warn, log was: %q", buf.String())
+	}
+	if s.eventCancel != nil {
+		t.Fatal("a failed subscription must not leave a cancel func behind")
+	}
+
+	buf.Reset()
+	s.startAgentEvents(nil)
+	if buf.Len() != 0 {
+		t.Fatalf("repeated failures should be silent at warn level, log was: %q", buf.String())
+	}
+}
+
+func TestStartAgentEventsWithoutNotifyDoesNothing(t *testing.T) {
+	var attempts int32
+	s := New(Config{})
+	s.subscribe = func(ctx context.Context, l *libvirt.Libvirt) (<-chan interface{}, error) {
+		atomic.AddInt32(&attempts, 1)
+		return make(chan interface{}), nil
+	}
+	s.startAgentEvents(nil)
+	if got := atomic.LoadInt32(&attempts); got != 0 {
+		t.Fatalf("subscribe attempts = %d, want 0 — no Notify means no subscription", got)
 	}
 }

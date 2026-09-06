@@ -16,14 +16,20 @@ import (
 
 // fakeDomains records which verbs were called and answers agent commands
 // from a canned reply/error, so the shutdown ladder can be walked without
-// a hypervisor in sight.
+// a hypervisor in sight. getInfoStates feeds DomainGetInfo a staged
+// sequence (repeating the last entry), so the reboot wait loop can be
+// walked through "still running" → "shut off".
 type fakeDomains struct {
 	calls       []string
 	agentReply  string
 	agentErr    error
 	verbErr     error
 	blockCreate chan struct{} // when non-nil, DomainCreate waits on it
+	getInfo     []uint8       // staged states for DomainGetInfo
 }
+
+var runningState uint8 = 1 // libvirt.DomainRunning
+var shutoffState uint8 = 5 // libvirt.DomainShutoff
 
 func (f *fakeDomains) DomainCreate(d libvirt.Domain) error {
 	f.calls = append(f.calls, "create")
@@ -34,10 +40,6 @@ func (f *fakeDomains) DomainCreate(d libvirt.Domain) error {
 }
 func (f *fakeDomains) DomainShutdownFlags(d libvirt.Domain, flags libvirt.DomainShutdownFlagValues) error {
 	f.calls = append(f.calls, "shutdownFlags")
-	return f.verbErr
-}
-func (f *fakeDomains) DomainReboot(d libvirt.Domain, flags libvirt.DomainRebootFlagValues) error {
-	f.calls = append(f.calls, "reboot")
 	return f.verbErr
 }
 func (f *fakeDomains) DomainDestroy(d libvirt.Domain) error {
@@ -51,6 +53,16 @@ func (f *fakeDomains) DomainSuspend(d libvirt.Domain) error {
 func (f *fakeDomains) DomainResume(d libvirt.Domain) error {
 	f.calls = append(f.calls, "resume")
 	return f.verbErr
+}
+func (f *fakeDomains) DomainGetInfo(d libvirt.Domain) (uint8, uint64, uint64, uint16, uint64, error) {
+	if len(f.getInfo) == 0 {
+		return runningState, 0, 0, 0, 0, f.verbErr
+	}
+	state := f.getInfo[0]
+	if len(f.getInfo) > 1 {
+		f.getInfo = f.getInfo[1:]
+	}
+	return state, 0, 0, 0, 0, f.verbErr
 }
 func (f *fakeDomains) QEMUDomainAgentCommand(d libvirt.Domain, cmd string, timeout int32, flags uint32) (libvirt.OptString, error) {
 	f.calls = append(f.calls, "agent:"+cmd)
@@ -174,6 +186,61 @@ func TestStartHappyPath(t *testing.T) {
 	}
 	if len(nudge) == 0 {
 		t.Error("finished job should have nudged the poller")
+	}
+}
+
+func TestRebootOrchestration(t *testing.T) {
+	// Reboot = graceful shutdown → wait for the guest to actually be off →
+	// start again. The fake walks the wait loop through "still running"
+	// then "shut off", so the sequence must be: agent shutdown, one or two
+	// GetInfo polls, then create.
+	fds := &fakeDomains{
+		agentErr: errors.New("guest agent command timed out: Guest agent disappeared while executing command"),
+		getInfo:  []uint8{runningState, shutoffState},
+	}
+	s, nudge := newTestStore(snapWith(runningVM(model.AgentOK)), &fakeConn{doms: fds}, time.Second)
+	s.cfg.RebootTimeout = time.Minute
+	s.cfg.WaitPoll = time.Millisecond
+
+	job, err := s.Submit("14_alpine_test", ActionReboot)
+	if err != nil {
+		t.Fatalf("Submit reboot: %v", err)
+	}
+	done := waitForJob(t, s, job.ID, StateOK)
+	if !fds.has("agent:"+`{"execute":"guest-shutdown"}`, "create") {
+		t.Errorf("calls = %v, want agent shutdown then create", fds.calls)
+	}
+	if !strings.Contains(done.Detail, "started again") {
+		t.Errorf("detail = %q", done.Detail)
+	}
+	if len(nudge) == 0 {
+		t.Error("finished reboot should have nudged the poller")
+	}
+}
+
+func TestRebootTimeoutLeavesTheVMTouchedButUntied(t *testing.T) {
+	// The guest refuses to die: the wait loop runs out, and the job ends
+	// as timeout with instructions instead of force-starting anything.
+	fds := &fakeDomains{
+		agentErr: errors.New("guest agent command timed out: Guest agent disappeared while executing command"),
+		getInfo:  []uint8{runningState}, // repeats "running" forever
+	}
+	s, _ := newTestStore(snapWith(runningVM(model.AgentOK)), &fakeConn{doms: fds}, time.Second)
+	s.cfg.RebootTimeout = 30 * time.Millisecond
+	s.cfg.WaitPoll = time.Millisecond
+
+	job, _ := s.Submit("14_alpine_test", ActionReboot)
+	done := waitForJob(t, s, job.ID, StateTimeout)
+	if !strings.Contains(done.Detail, "force off or start it manually") {
+		t.Errorf("timeout detail = %q", done.Detail)
+	}
+	if fds.has("create") || len(fds.calls) == 0 && true {
+		// create must not have run; the only calls should be the agent one
+		for _, c := range fds.calls {
+			if c == "create" {
+				t.Error("reboot timeout must not reach the start phase")
+			}
+		}
 	}
 }
 

@@ -11,9 +11,14 @@
 // libvirt when -allow-actions is on. No write verbs exist in this package —
 // the interface below only declares names — and the CI allowlist keeps it
 // that way.
+//
+// Event subscriptions are pure reads: libvirt tells us when a guest-agent
+// channel changes state, which is information it already watches on our
+// behalf. We use that to nudge the poll loop, never to write anything.
 package libvirtsrc
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"log/slog"
@@ -68,6 +73,14 @@ type Config struct {
 	// Concurrency caps how many VMs we interrogate at once.
 	Concurrency int
 
+	// Notify is called whenever libvirt reports a guest-agent channel state
+	// change for any domain — libvirt pushing what it already watches
+	// instead of Pademelon waiting for the next poll. It must not block:
+	// main wires it to the poll loop's one-slot nudge channel. The poll
+	// stays the only writer of the cache; the event just makes the next
+	// poll happen sooner. Nil disables event subscription entirely.
+	Notify func()
+
 	Log *slog.Logger
 }
 
@@ -101,6 +114,26 @@ type Source struct {
 	// statsPeriodSet remembers for which VMs we have switched on QEMU's
 	// balloon stats poll timer during this boot of each VM.
 	statsPeriodSet map[string]bool
+
+	// agentEvents holds one pending agent-lifecycle hint per libvirt domain
+	// ID: the footprint of a channel state change libvirt told us about,
+	// waiting for the next poll to confirm it and clear it. One entry per
+	// domain — an agent bouncing during a guest boot overwrites, it never
+	// accumulates.
+	agentEvents map[int32]time.Time
+
+	// subscribe opens the guest-agent event stream. A seam for tests; New
+	// points it at the real libvirt subscription.
+	subscribe eventSubscriber
+
+	// eventCancel cancels the live event subscription. Nil when none is
+	// running; the drain goroutine exits on its own once it fires.
+	eventCancel context.CancelFunc
+
+	// eventsUnavailable remembers whether a failed subscription has already
+	// been complained about, so a libvirt that won't do events doesn't
+	// write a fresh warning on every reconnect.
+	eventsUnavailable bool
 }
 
 type cpuSample struct {
@@ -141,6 +174,9 @@ func New(cfg Config) *Source {
 			"stale_after", clocks.BalloonStaleAfter,
 		)
 	}
+	if cfg.Notify != nil {
+		cfg.Log.Info("guest agent lifecycle events enabled; a channel state change nudges the poll loop")
+	}
 	return &Source{
 		cfg:            cfg,
 		log:            cfg.Log,
@@ -150,6 +186,8 @@ func New(cfg Config) *Source {
 		lastAgent:      map[string]model.AgentState{},
 		lastMemStale:   map[string]bool{},
 		statsPeriodSet: map[string]bool{},
+		agentEvents:    map[int32]time.Time{},
+		subscribe:      subscribeAgentLifecycle,
 	}
 }
 
@@ -166,10 +204,10 @@ type ConnSource interface {
 type Domains interface {
 	DomainCreate(d libvirt.Domain) error
 	DomainShutdownFlags(d libvirt.Domain, flags libvirt.DomainShutdownFlagValues) error
-	DomainReboot(d libvirt.Domain, flags libvirt.DomainRebootFlagValues) error
 	DomainDestroy(d libvirt.Domain) error
 	DomainSuspend(d libvirt.Domain) error
 	DomainResume(d libvirt.Domain) error
+	DomainGetInfo(d libvirt.Domain) (rState uint8, rMaxMem uint64, rMemory uint64, rNrVirtCPU uint16, rCPUTime uint64, err error)
 	QEMUDomainAgentCommand(d libvirt.Domain, cmd string, timeout int32, flags uint32) (libvirt.OptString, error)
 	ConnectListAllDomains(need int32, flags libvirt.ConnectListAllDomainsFlags) ([]libvirt.Domain, uint32, error)
 }
@@ -191,10 +229,122 @@ func (s *Source) WithConnection(fn func(Domains) error) error {
 func (s *Source) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.stopAgentEvents()
 	if s.conn != nil {
 		_ = s.conn.Disconnect()
 		s.conn = nil
 	}
+}
+
+// eventSubscriber opens a guest-agent lifecycle event stream on a
+// connection. It exists so tests can inject a fake; New points it at the
+// real libvirt subscription.
+type eventSubscriber func(ctx context.Context, l *libvirt.Libvirt) (<-chan interface{}, error)
+
+// subscribeAgentLifecycle opens libvirt's guest-agent lifecycle event
+// stream for every domain. A subscription changes nothing on the daemon or
+// in any domain — it is libvirt sharing what it already watches — so this
+// is a read-side call and lives here, not in internal/actions.
+func subscribeAgentLifecycle(ctx context.Context, l *libvirt.Libvirt) (<-chan interface{}, error) {
+	return l.SubscribeEvents(ctx, libvirt.DomainEventIDAgentLifecycle, nil)
+}
+
+// startAgentEvents subscribes and spawns the drain goroutine. Called with
+// the mutex held, straight after a successful (re)connect: a subscription
+// belongs to one connection and dies with it. Failures degrade, they don't
+// kill the poll — without events, the poll interval is simply the only
+// source of agent state, exactly as before this feature existed.
+func (s *Source) startAgentEvents(l *libvirt.Libvirt) {
+	if s.cfg.Notify == nil {
+		return // feature not wired up; the poll ticker is the whole story
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, err := s.subscribe(ctx, l)
+	if err != nil {
+		cancel()
+		s.warnEventsUnavailable(err)
+		return
+	}
+	s.eventCancel = cancel
+	go s.drainAgentEvents(ctx, ch)
+}
+
+// stopAgentEvents cancels the live subscription. The drain goroutine exits
+// on its own: the event channel closes when the context is cancelled.
+func (s *Source) stopAgentEvents() {
+	if s.eventCancel != nil {
+		s.eventCancel()
+		s.eventCancel = nil
+	}
+}
+
+// drainAgentEvents turns delivered events into hints and nudges until the
+// stream ends — either we cancelled it because the connection died, or
+// libvirt closed it. Losing an event costs at most one poll interval of
+// freshness, never correctness.
+func (s *Source) drainAgentEvents(ctx context.Context, ch <-chan interface{}) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			if msg, ok := ev.(*libvirt.DomainEventCallbackAgentLifecycleMsg); ok {
+				s.handleAgentEvent(msg)
+			}
+		}
+	}
+}
+
+// handleAgentEvent records a channel state change as a hint for the next
+// poll and pokes the notify callback so that poll happens sooner. Repeated
+// events for the same domain overwrite the hint rather than pile up.
+func (s *Source) handleAgentEvent(msg *libvirt.DomainEventCallbackAgentLifecycleMsg) {
+	s.mu.Lock()
+	s.agentEvents[msg.Dom.ID] = time.Now()
+	s.mu.Unlock()
+
+	s.log.Debug("guest agent channel event",
+		"domain_id", msg.Dom.ID,
+		"state", libvirt.ConnectDomainEventAgentLifecycleState(msg.State),
+		"reason", libvirt.ConnectDomainEventAgentLifecycleReason(msg.Reason),
+	)
+
+	if s.cfg.Notify != nil {
+		s.cfg.Notify()
+	}
+}
+
+// consumeAgentEvent returns and clears the pending agent-lifecycle hint for
+// one domain. The hint is bookkeeping, never state: the poll that consumes
+// it still reads the channel state out of the XML and writes the truth.
+func (s *Source) consumeAgentEvent(id int32) (time.Time, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	at, ok := s.agentEvents[id]
+	if ok {
+		delete(s.agentEvents, id)
+	}
+	return at, ok
+}
+
+// warnEventsUnavailable complains about a failed event subscription —
+// loudly once per process, quietly afterwards, so a libvirt that won't do
+// events doesn't write a warning on every reconnect.
+func (s *Source) warnEventsUnavailable(err error) {
+	s.mu.Lock()
+	first := !s.eventsUnavailable
+	s.eventsUnavailable = true
+	s.mu.Unlock()
+
+	if first {
+		s.log.Warn("guest agent lifecycle events unavailable; agent state follows the poll interval only", "err", err)
+		return
+	}
+	s.log.Debug("guest agent lifecycle events still unavailable", "err", err)
 }
 
 // connect returns a live libvirt handle, dialling if needed.
@@ -211,6 +361,9 @@ func (s *Source) connect() (*libvirt.Libvirt, error) {
 		return s.conn, nil
 	}
 	if s.conn != nil {
+		// Kill the event subscription before the connection it rides on,
+		// so the drain goroutine never outlives the socket it reads from.
+		s.stopAgentEvents()
 		_ = s.conn.Disconnect()
 		s.conn = nil
 	}
@@ -224,6 +377,7 @@ func (s *Source) connect() (*libvirt.Libvirt, error) {
 	}
 	s.log.Info("connected to libvirt", "socket", s.cfg.Socket)
 	s.conn = l
+	s.startAgentEvents(l)
 	return l, nil
 }
 
@@ -286,6 +440,11 @@ func (s *Source) Poll() (model.Snapshot, error) {
 // because "this VM exists and is running but the agent is quiet" is useful
 // information, not a failure.
 func (s *Source) inspect(conn *libvirt.Libvirt, d libvirt.Domain) model.VM {
+	// Consume any pending agent-lifecycle hint for this domain up front, so
+	// a hint can never outlive its poll — domain IDs get reused by libvirt.
+	// The confirmation is logged at the end, where the poll knows the truth.
+	eventAt, hadAgentEvent := s.consumeAgentEvent(d.ID)
+
 	vm := model.VM{
 		Domain:      d.Name,
 		Name:        d.Name,
@@ -385,6 +544,10 @@ func (s *Source) inspect(conn *libvirt.Libvirt, d libvirt.Domain) model.VM {
 		vm.Agent = model.AgentDisconnected
 	}
 
+	if hadAgentEvent {
+		s.log.Debug("agent channel event confirmed by poll", "domain", d.Name,
+			"agent_state", vm.Agent, "event_at", eventAt)
+	}
 	s.logAgentTransition(d.Name, vm.Agent)
 	return vm
 }

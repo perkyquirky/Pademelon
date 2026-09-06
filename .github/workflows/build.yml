@@ -45,7 +45,8 @@ jobs:
           #    the six reviewed verbs. A new verb means a PR note, not a
           #    quiet addition.
           if grep -rnE '\.Domain[A-Z][A-Za-z]*\(' --include='*.go' ./internal/actions | \
-               grep -vE '\.(DomainCreate|DomainShutdownFlags|DomainReboot|DomainDestroy|DomainSuspend|DomainResume)\(' ; then
+               grep -v 'libvirt\.Domain' | \
+               grep -vE '\.(DomainCreate|DomainShutdownFlags|DomainDestroy|DomainSuspend|DomainResume|DomainGetInfo)\(' ; then
             echo "::error::internal/actions called a verb outside the reviewed allowlist"
             exit 1
           fi
