@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -57,7 +58,7 @@ func post(s *Server, path, cookie string, withCSRF bool) *httptest.ResponseRecor
 	req := httptest.NewRequest("POST", path, nil)
 	req.RemoteAddr = "203.0.113.7:4444"
 	if withCSRF {
-		req.Header.Set("X-Requested-With", "pademelon")
+		req.Header.Set(CSRFHeaderName, CSRFHeaderValue)
 	}
 	if cookie != "" {
 		req.Header.Set("Cookie", cookie)
@@ -247,4 +248,40 @@ func cookieHeader(cookie string) http.Header {
 	h := http.Header{}
 	h.Set("Cookie", cookie)
 	return h
+}
+
+// TestPagePowerMenuVerbsMatchServer keeps the JS power menu and Go's verb
+// list in lockstep, in the spirit of the theme sync tests: the menu's
+// item("...") calls must be exactly the set ParseAction accepts. Add a
+// verb on one side only and this fails the build, so it can't be forgotten.
+func TestPagePowerMenuVerbsMatchServer(t *testing.T) {
+	page := string(indexHTML)
+	re := regexp.MustCompile(`item\("([a-z-]+)"`)
+	matches := re.FindAllStringSubmatch(page, -1)
+	if len(matches) == 0 {
+		t.Fatal("no power-menu items found in index.html; did the menu markup change shape?")
+	}
+	menuVerbs := map[string]bool{}
+	for _, m := range matches {
+		menuVerbs[m[1]] = true
+	}
+	serverVerbs := map[string]bool{}
+	for _, a := range actions.Actions() {
+		serverVerbs[string(a)] = true
+	}
+
+	var menuOnly, serverOnly []string
+	for v := range menuVerbs {
+		if !serverVerbs[v] {
+			menuOnly = append(menuOnly, v)
+		}
+	}
+	for v := range serverVerbs {
+		if !menuVerbs[v] {
+			serverOnly = append(serverOnly, v)
+		}
+	}
+	if len(menuOnly) > 0 || len(serverOnly) > 0 {
+		t.Errorf("power menu and ParseAction disagree: menu-only %v, server-only %v", menuOnly, serverOnly)
+	}
 }

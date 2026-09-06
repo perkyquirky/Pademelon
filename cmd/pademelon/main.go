@@ -37,7 +37,7 @@ func main() {
 		interval     = flag.Duration("interval", clocks.DefaultPollInterval, "how often to poll libvirt")
 		agentTimeout = flag.Duration("agent-timeout", clocks.DefaultAgentTimeout, "how long to allow one guest agent command, e.g. 5s")
 		statsPeriod  = flag.Duration("stats-period", clocks.DefaultStatsPeriod, "how often QEMU refreshes guest balloon stats; 0s shows allocated RAM only")
-		concurrency  = flag.Int("concurrency", 8, "how many VMs to interrogate at once")
+		concurrency  = flag.Int("concurrency", clocks.DefaultConcurrency, "how many VMs to interrogate at once; 0 = one worker per VM (default)")
 		theme        = flag.String("theme", web.DefaultTheme, "default colour theme: "+strings.Join(web.Themes(), ", "))
 		authToken    = flag.String("auth-token", "", "token required by private routes (default: $PADAMELON_TOKEN or $PADAMELON_TOKEN_FILE)")
 		allowActions = flag.Bool("allow-actions", false, "enable VM action routes (start, shutdown, reboot, force off, pause, resume); requires an auth token (default: $PADAMELON_ALLOW_ACTIONS)")

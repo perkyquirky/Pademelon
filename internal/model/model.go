@@ -128,8 +128,10 @@ type VM struct {
 
 	// XML is the raw domain definition from the last poll, served by
 	// /api/vm/{name}/xml. Storing it keeps the architecture honest: the
-	// poller talks to libvirt, handlers read the cache.
-	XML string `json:"xml,omitempty"`
+	// poller talks to libvirt, handlers read the cache. It is deliberately
+	// not in the JSON — only that route serves it, and shipping every
+	// VM's full XML on every /api/vms fetch would be dead weight.
+	XML string `json:"-"`
 
 	Updated time.Time `json:"updated"`
 	Stale   bool      `json:"stale"` // last poll failed, showing older data

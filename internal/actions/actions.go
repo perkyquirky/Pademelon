@@ -42,14 +42,34 @@ const (
 	ActionResume   Action = "resume"
 )
 
+// allActions is the reviewed verb list, in the order the UI shows them.
+// ParseAction validates against it and Actions() hands it out — one list,
+// so a verb can only be added or removed in one Go place, and the page
+// sync test fails until the menu matches.
+var allActions = []Action{
+	ActionStart,
+	ActionShutdown,
+	ActionReboot,
+	ActionForceOff,
+	ActionPause,
+	ActionResume,
+}
+
+// Actions returns the full verb set. Treat the result as read-only.
+func Actions() []Action {
+	out := make([]Action, len(allActions))
+	copy(out, allActions)
+	return out
+}
+
 // ParseAction validates the URL's action segment.
 func ParseAction(s string) (Action, error) {
-	switch Action(s) {
-	case ActionStart, ActionShutdown, ActionReboot, ActionForceOff, ActionPause, ActionResume:
-		return Action(s), nil
-	default:
-		return "", fmt.Errorf("unknown action %q", s)
+	for _, a := range allActions {
+		if a == Action(s) {
+			return a, nil
+		}
 	}
+	return "", fmt.Errorf("unknown action %q", s)
 }
 
 // Job states, in the order a healthy job moves through them.

@@ -14,6 +14,15 @@ import (
 	"pademelon/internal/actions"
 )
 
+// The proof-of-origin header action POSTs must carry, and the value the
+// page sends with it. Named once here so the guard, the tests and the JS
+// pin test all reference the same definition instead of copy-pasted
+// literals that can drift apart quietly.
+const (
+	CSRFHeaderName  = "X-Requested-With"
+	CSRFHeaderValue = "pademelon"
+)
+
 // csrfGuard is the second lock on the action routes. The session cookie is
 // SameSite=Lax, which already keeps it off cross-site POSTs; requiring a
 // custom header as well means a drive-by needs a CORS preflight, and
@@ -21,9 +30,9 @@ import (
 // nothing else bothers to.
 func csrfGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Requested-With") == "" {
+		if r.Header.Get(CSRFHeaderName) == "" {
 			w.Header().Set("Cache-Control", "no-store")
-			http.Error(w, "missing X-Requested-With header", http.StatusForbidden)
+			http.Error(w, "missing "+CSRFHeaderName+" header", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)

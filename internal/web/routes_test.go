@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -51,6 +52,38 @@ func TestXMLRouteServesSnapshotCopy(t *testing.T) {
 	// A guessed name the poller never reported is worth nothing.
 	if code, _, _ := doGetBody(s, "/api/vm/99_nope/xml", nil); code != http.StatusNotFound {
 		t.Errorf("xml for unknown domain = %d, want 404", code)
+	}
+}
+
+// TestVMsPayloadOmitsXML keeps /api/vms lean: the XML viewer has its own
+// route, so shipping every VM's full domain XML on every 1.5s poll would be
+// dead weight. The snapshot must still carry it server-side — the XML route
+// reads the same cache.
+func TestVMsPayloadOmitsXML(t *testing.T) {
+	cache := model.NewCache()
+	cache.Set(model.Snapshot{
+		Connected: true,
+		VMs: []model.VM{
+			{Domain: "7_web", XML: "<domain type='kvm'>\n  <name>7_web</name>\n</domain>"},
+		},
+	})
+	s := New(Config{Cache: cache, Log: discardLogger(), Theme: DefaultTheme})
+
+	code, _, body := doGetBody(s, "/api/vms", nil)
+	if code != http.StatusOK {
+		t.Fatalf("/api/vms = %d, want 200", code)
+	}
+	if strings.Contains(body, "xml") {
+		t.Error("/api/vms body contains XML; the payload should carry only the parsed fields")
+	}
+
+	// Same cache, dedicated route: the XML is still there for the viewer.
+	code, _, body = doGetBody(s, "/api/vm/7_web/xml", nil)
+	if code != http.StatusOK {
+		t.Fatalf("/api/vm/7_web/xml = %d, want 200 (XML must stay cached server-side)", code)
+	}
+	if !strings.Contains(body, "<name>7_web</name>") {
+		t.Errorf("xml body doesn't match the cached copy, got: %q", body)
 	}
 }
 
@@ -115,7 +148,9 @@ func TestPageMarkupSyncWithRoutes(t *testing.T) {
 	for _, want := range []string{
 		`fetch("/api/refresh"`,
 		"/api/vm/",
-		`"X-Requested-With": "pademelon"`,
+		// Built from the Go constants: if either the header name or the
+		// value ever changes, this pin fails until the page matches.
+		fmt.Sprintf(`"%s": "%s"`, CSRFHeaderName, CSRFHeaderValue),
 		`/api/vm/${encodeURIComponent(domain)}/`,
 		`/api/actions/shutdown-all`,
 		`id="btn-refresh"`,

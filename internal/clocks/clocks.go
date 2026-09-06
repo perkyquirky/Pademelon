@@ -27,6 +27,12 @@ const (
 	// DefaultStatsPeriod is how often QEMU re-collects balloon stats inside
 	// each guest. 0 disables the collection timer.
 	DefaultStatsPeriod = 10 * time.Second
+
+	// DefaultConcurrency is the -concurrency default: 0 means auto — one
+	// worker per VM, so a poll interrogates every guest in a single wave
+	// instead of arbitrary waves of 8. A positive value caps that, for a
+	// very large fleet or slow storage.
+	DefaultConcurrency = 0
 )
 
 // UIRefresh is how often the browser re-fetches /api/vms. The real value

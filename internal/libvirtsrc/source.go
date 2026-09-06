@@ -70,7 +70,9 @@ type Config struct {
 	// boot-snapshot behaviour (with stale readings rejected).
 	StatsPeriod time.Duration
 
-	// Concurrency caps how many VMs we interrogate at once.
+	// Concurrency caps how many VMs we interrogate at once. 0 (or less)
+	// means auto: one worker per VM, so a poll runs in one wave. A
+	// positive value caps the parallelism instead.
 	Concurrency int
 
 	// Notify is called whenever libvirt reports a guest-agent channel state
@@ -157,9 +159,8 @@ func New(cfg Config) *Source {
 	if cfg.AgentTimeout <= 0 {
 		cfg.AgentTimeout = clocks.DefaultAgentTimeout
 	}
-	if cfg.Concurrency <= 0 {
-		cfg.Concurrency = 8
-	}
+	// Concurrency keeps its value as-is: 0 is meaningful now (auto size at
+	// poll time), so there is no fallback default to normalise.
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
@@ -399,7 +400,17 @@ func (s *Source) Poll() (model.Snapshot, error) {
 	}
 
 	vms := make([]model.VM, len(domains))
-	sem := make(chan struct{}, s.cfg.Concurrency)
+
+	// Auto concurrency: one worker per VM, so a poll interrogates every
+	// guest in a single wave. A positive -concurrency caps it instead.
+	workers := s.cfg.Concurrency
+	if workers <= 0 {
+		workers = len(domains)
+		if workers < 1 {
+			workers = 1
+		}
+	}
+	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
 
 	for i, d := range domains {
@@ -467,6 +478,11 @@ func (s *Source) inspect(conn *libvirt.Libvirt, d libvirt.Domain) model.VM {
 	if err != nil {
 		s.log.Warn("domain info failed", "domain", d.Name, "err", err)
 		vm.State = "unknown"
+		// We never got far enough to ask the agent anything — report that
+		// as an error rather than the zero value, which the API would
+		// render as a mysterious empty "agent" field.
+		vm.Agent = model.AgentError
+		vm.AgentError = err.Error()
 		return vm
 	}
 

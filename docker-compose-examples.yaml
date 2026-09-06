@@ -22,8 +22,11 @@ services:
     # -listen changes the internal listen port, dont change unless you know why you would
       - "-listen=:8088"
 
-    # Sets how many VM's to poll at once. If you have more than 8, increase this number
-      - "-concurrency=8"
+    # Caps how many VM's are polled at once. 0 (the default) uses one
+    # worker per VM — all guests in a single wave — so most setups need
+    # nothing here. Set a number only to cap a very large fleet or slow
+    # storage.
+    # - "-concurrency=0"
 
     # This sets the polling rate for all stats. As the data needs to be queried to the libvirt socket manually to get fresh data this needs to be set.
     # CPU usage, memory usage, network info, drive data, agent status, etc. are all controlled with this timer. 
