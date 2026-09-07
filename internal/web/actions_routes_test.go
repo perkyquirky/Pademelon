@@ -41,6 +41,22 @@ func (f *fakeActions) List() []actions.Job { return f.list }
 func (f *fakeActions) ShutdownAll() ([]string, []string) {
 	return f.planned, f.skipped
 }
+func (f *fakeActions) SubmitRestore(domain string, opts actions.RestoreOpts) (*actions.Job, error) {
+	f.lastDomain = domain
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.job = actions.Job{ID: "rest1", Domain: domain, Action: actions.ActionRestore, Snapshot: opts.SnapshotID, Mode: opts.Mode}
+	return &f.job, nil
+}
+func (f *fakeActions) SubmitDelete(domain, snapshotID string) (*actions.Job, error) {
+	f.lastDomain = domain
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.job = actions.Job{ID: "del1", Domain: domain, Action: actions.ActionDelete, Snapshot: snapshotID}
+	return &f.job, nil
+}
 
 func newActionsTestServer(token string, submitter ActionSubmitter) *Server {
 	return New(Config{
@@ -69,10 +85,10 @@ func post(s *Server, path, cookie string, withCSRF bool) *httptest.ResponseRecor
 }
 
 func TestActionRoutesUnregisteredWithoutActions(t *testing.T) {
-	// Nil store: the routes don't exist at all. A read-only deployment is
+	// Nil store: the routes do not exist at all. A read-only deployment is
 	// verifiably read-only at runtime, not just by grep. The mux answers a
 	// POST to an unregistered path with 405 — the page catch-all only
-	// serves GETs — which is the honest "this server doesn't do that".
+	// serves GETs — which is the honest "this server does not do that".
 	s := newActionsTestServer("", nil)
 
 	rec := post(s, "/api/vm/14_alpine_test/shutdown", "", true)
@@ -250,20 +266,24 @@ func cookieHeader(cookie string) http.Header {
 	return h
 }
 
-// TestPagePowerMenuVerbsMatchServer keeps the JS power menu and Go's verb
-// list in lockstep, in the spirit of the theme sync tests: the menu's
-// item("...") calls must be exactly the set ParseAction accepts. Add a
-// verb on one side only and this fails the build, so it can't be forgotten.
+// TestPagePowerMenuVerbsMatchServer keeps the page's action buttons and
+// Go's verb list in lockstep, in the spirit of the theme sync tests: every
+// verb the page can send (power-menu items and panel-action buttons) must
+// be a verb ParseAction accepts. Add a verb on one side only and this
+// fails the build, so it can't be forgotten.
 func TestPagePowerMenuVerbsMatchServer(t *testing.T) {
 	page := string(indexHTML)
-	re := regexp.MustCompile(`item\("([a-z-]+)"`)
-	matches := re.FindAllStringSubmatch(page, -1)
-	if len(matches) == 0 {
-		t.Fatal("no power-menu items found in index.html; did the menu markup change shape?")
-	}
 	menuVerbs := map[string]bool{}
-	for _, m := range matches {
-		menuVerbs[m[1]] = true
+	for _, re := range []*regexp.Regexp{
+		regexp.MustCompile(`item\("([a-z-]+)"`),
+		regexp.MustCompile(`data-act="([a-z-]+)"`),
+	} {
+		for _, m := range re.FindAllStringSubmatch(page, -1) {
+			menuVerbs[m[1]] = true
+		}
+	}
+	if len(menuVerbs) == 0 {
+		t.Fatal("no action verbs found in index.html; did the menu markup change shape?")
 	}
 	serverVerbs := map[string]bool{}
 	for _, a := range actions.Actions() {
@@ -282,6 +302,121 @@ func TestPagePowerMenuVerbsMatchServer(t *testing.T) {
 		}
 	}
 	if len(menuOnly) > 0 || len(serverOnly) > 0 {
-		t.Errorf("power menu and ParseAction disagree: menu-only %v, server-only %v", menuOnly, serverOnly)
+		t.Errorf("page verbs and ParseAction disagree: page-only %v, server-only %v", menuOnly, serverOnly)
 	}
+}
+
+// TestSubmitSnapshotWithoutMiddlewareIs503: the snapshot verb exists but
+// the integration is off — "service unavailable" says "try later/config",
+// which 409 ("you did something wrong") would not.
+func TestSubmitSnapshotWithoutMiddlewareIs503(t *testing.T) {
+	fa := &fakeActions{err: actions.ErrMiddlewareOff}
+	s := newActionsTestServer("tok-123", fa)
+	cookie := loginCookie(t, s, "tok-123")
+
+	rec := post(s, "/api/vm/14_alpine_test/snapshot", cookie, true)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("snapshot with integration off = %d, want 503", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "middleware integration is off") {
+		t.Errorf("503 body should say why, got: %s", rec.Body.String())
+	}
+}
+
+func TestRestoreAndDeleteRoutes(t *testing.T) {
+	fa := &fakeActions{}
+	s := newActionsTestServer("tok-123", fa)
+	cookie := loginCookie(t, s, "tok-123")
+	path := "/api/vm/14_alpine_test/snapshot/nvme%2Fvms%2Fx%40pademelon-x-1/restore"
+
+	// Happy staged restore: 202 with the job envelope.
+	rec := postJSON(s, path, cookie, `{"mode":"staged","startAfter":true,"ack":true}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("staged restore = %d, want 202 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"id": "rest1"`) || !strings.Contains(rec.Body.String(), `"mode": "staged"`) {
+		t.Errorf("restore body = %s", rec.Body.String())
+	}
+
+	// Direct restore of a running VM without ack: 409, the reason says so.
+	fa.err = actions.ErrInvalidState
+	rec = postJSON(s, path, cookie, `{"mode":"direct","ack":false}`)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("direct without ack = %d, want 409", rec.Code)
+	}
+
+	// Unknown snapshot: 404.
+	fa.err = actions.ErrUnknownSnapshot
+	rec = postJSON(s, path, cookie, `{"mode":"staged"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown snapshot = %d, want 404", rec.Code)
+	}
+
+	// A malformed mode: 400.
+	fa.err = actions.ErrBadRestore
+	rec = postJSON(s, path, cookie, `{"mode":"sideways"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("bad mode = %d, want 400", rec.Code)
+	}
+
+	// No body at all: 400, not a 500 from a nil decode.
+	rec = post(s, path, cookie, true)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("bodyless restore = %d, want 400", rec.Code)
+	}
+
+	// Delete: 202, then 404 for an unknown snapshot.
+	fa.err = nil
+	rec = postDelete(s, "/api/vm/14_alpine_test/snapshot/nvme%2Fvms%2Fx%40pademelon-x-1", cookie)
+	if rec.Code != http.StatusAccepted || !strings.Contains(rec.Body.String(), `"action": "delete"`) {
+		t.Errorf("delete = %d %s, want 202 delete job", rec.Code, rec.Body.String())
+	}
+	fa.err = actions.ErrUnknownSnapshot
+	rec = postDelete(s, "/api/vm/14_alpine_test/snapshot/nvme%2Fvms%2Fx%40ghost", cookie)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("unknown snapshot delete = %d, want 404", rec.Code)
+	}
+
+	// Both routes sit behind the CSRF guard like every other write.
+	fa.err = nil
+	req := httptest.NewRequest("POST", path, strings.NewReader(`{"mode":"staged"}`))
+	req.RemoteAddr = "203.0.113.7:4444"
+	req.Header.Set("Cookie", cookie)
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("restore without CSRF header = %d, want 403", rec.Code)
+	}
+	req = httptest.NewRequest("DELETE", "/api/vm/14_alpine_test/snapshot/nvme%2Fvms%2Fx%40pademelon-x-1", nil)
+	req.RemoteAddr = "203.0.113.7:4444"
+	req.Header.Set("Cookie", cookie)
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("delete without CSRF header = %d, want 403", rec.Code)
+	}
+}
+
+// postJSON posts a JSON body with the CSRF header, like the page's
+// restore fetches do.
+func postJSON(s *Server, path, cookie, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", path, strings.NewReader(body))
+	req.RemoteAddr = "203.0.113.7:4444"
+	req.Header.Set(CSRFHeaderName, CSRFHeaderValue)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Cookie", cookie)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// postDelete sends a DELETE with the CSRF header.
+func postDelete(s *Server, path, cookie string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("DELETE", path, nil)
+	req.RemoteAddr = "203.0.113.7:4444"
+	req.Header.Set(CSRFHeaderName, CSRFHeaderValue)
+	req.Header.Set("Cookie", cookie)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	return rec
 }

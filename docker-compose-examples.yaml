@@ -19,34 +19,39 @@ services:
     # Valid options: sweetpea, classic, charm, catppuccin-latte, catppuccin-frappe, catppuccin-macchiato, catppuccin-mocha, dracula, noctis
       - "-theme=dracula"
 
-    # -listen changes the internal listen port, dont change unless you know why you would
+    # -listen changes the internal listen port. Do not change it unless
+    # you know why you would.
       - "-listen=:8088"
 
-    # Caps how many VM's are polled at once. 0 (the default) uses one
+    # Caps how many VMs are polled at once. 0 (the default) uses one
     # worker per VM — all guests in a single wave — so most setups need
     # nothing here. Set a number only to cap a very large fleet or slow
     # storage.
     # - "-concurrency=0"
 
-    # This sets the polling rate for all stats. As the data needs to be queried to the libvirt socket manually to get fresh data this needs to be set.
-    # CPU usage, memory usage, network info, drive data, agent status, etc. are all controlled with this timer. 
+    # This sets the polling rate for all stats. The data must be read
+    # from the libvirt socket for fresh values, so set this timer.
+    # CPU usage, memory usage, network info, drive data, agent status,
+    # and more all follow this timer.
       - "-interval=30s"
 
     # Caps each guest agent command at 5 seconds, so if one command hangs
     # the poll moves on instead of stalling on that VM.
       - "-agent-timeout=5s"
 
-    # This is required to get fresh memory statistics, without it stale data is returned. Do not adjust unless necessary
+    # This is required for fresh memory statistics; without it, the data
+    # is stale. Do not adjust unless necessary
       - "-stats-period=10s"
-    
-    # Sets the level of logging: `debug`, `info`, `warn`, `error` 
+
+    # Sets the level of logging: `debug`, `info`, `warn`, `error`
       - "-log-level=info"
 
     # Sets the logging output format: `text` or `json`
       - "-log-format=text"
 
-    # Sets the path for the libvirt socket. This won't need changing unless TrueNAS
-    # changes the location of the socket. If the socket ever moves, change the host
+    # Sets the path for the libvirt socket. This will not need changing
+    # unless TrueNAS changes the location of the socket. If the socket
+    # ever moves, change the host
     # side (left) of the mount to the new directory — the container side can stay
     # /run/truenas_libvirt:
     #   volumes:
@@ -58,9 +63,9 @@ services:
 
 # ---------------------------------------------------------------
 # Token auth — required for the VM power actions, optional otherwise.
-# This ensures no one on the local network can make changes to VM's
+# This stops anyone on the local network from making changes to VMs
 # without authentication. This is NOT a valid security measure for
-# internet facing traffic.
+# internet-facing traffic.
 #
 # Generate a token with:  openssl rand -hex 32
 # or use a password of your choosing.

@@ -1,11 +1,11 @@
-// Package agent speaks the QEMU guest agent's JSON protocol.
+// Package agent implements the JSON protocol of the QEMU guest agent.
 //
-// It deliberately knows nothing about libvirt. Callers hand in a Caller that
-// gets a command string to the agent and brings the reply back, which keeps
-// this package easy to test with canned JSON.
+// The package knows nothing about libvirt. Callers supply a Caller that
+// sends the command string to the agent and returns the reply. This
+// keeps the package easy to test with canned JSON.
 //
-// Deliberately absent: guest-exec. It is remote code execution into the
-// guest, and nothing here needs it. Don't add it.
+// The package does not implement guest-exec. It gives remote code
+// execution into the guest. Nothing here needs it. Do not add it.
 package agent
 
 import (
@@ -48,12 +48,12 @@ func call(c Caller, cmd string, out any) error {
 	return nil
 }
 
-// Ping checks the agent is actually answering. Cheap, and a good first call
-// so we don't attribute a dead agent to whichever command happened to be
-// first in the list.
+// Ping checks that the agent answers. Call it before the other
+// commands. Then a dead agent shows as a ping failure, not as a
+// failure of the first command in the list.
 func Ping(c Caller) error {
-	// guest-ping replies with an empty object, which call() would reject as
-	// an empty return, so check the raw reply here instead.
+	// guest-ping returns an empty object. call rejects an empty return.
+	// Ping reads the raw reply itself.
 	raw, err := c(`{"execute":"guest-ping"}`)
 	if err != nil {
 		return err
@@ -76,10 +76,10 @@ func Ping(c Caller) error {
 	return nil
 }
 
-// Info returns the agent's self-reported version (e.g. "8.2") and the
-// list of commands this build supports. The version answers "why doesn't
-// this VM show X?" in one glance; the command list is how later features
-// degrade honestly on old agents instead of throwing errors.
+// Info returns the version that the agent reports (for example "8.2")
+// and the commands that this build supports. The version shows why a
+// VM does not show a feature. Later features can check the command
+// list. They hide on old agents instead of throwing errors.
 func Info(c Caller) (version string, commands []string, err error) {
 	var r struct {
 		Version   string `json:"version"`
@@ -97,12 +97,12 @@ func Info(c Caller) (version string, commands []string, err error) {
 	return r.Version, names, nil
 }
 
-// Time returns the guest's wall clock as nanoseconds since the epoch.
-// The reply is the bare number itself — `{"return":<nanos>}` — which the
-// live test on a real QGA 11 agent settled after the docs-shaped guess
-// turned out wrong. Compared against the host clock at poll time it gives
-// the clock drift: a paused or restored VM is minutes out; a healthy one
-// sits within a second or two of noise.
+// Time returns the guest clock as nanoseconds since the epoch. The
+// reply is the bare number, `{"return":<nanos>}`, not an object. A
+// live test against a QGA 11 agent confirmed this format. The docs
+// disagree. Compare the value with the host clock at poll time to get
+// the drift. A paused or restored VM is minutes out. A healthy VM
+// stays within one or two seconds.
 func Time(c Caller) (int64, error) {
 	var nanos int64
 	if err := call(c, `{"execute":"guest-get-time"}`, &nanos); err != nil {
@@ -147,9 +147,9 @@ func OSInfo(c Caller) (osName, kernel string, err error) {
 	return osName, kernel, nil
 }
 
-// Interfaces returns the guest's network interfaces, with the container and
-// virtual ones flagged rather than dropped — the web layer decides what to
-// show, we just label them.
+// Interfaces returns the guest network interfaces. It flags the
+// container and virtual interfaces instead of dropping them. The web
+// layer decides what to show.
 func Interfaces(c Caller) ([]model.Iface, error) {
 	var r []struct {
 		Name string `json:"name"`
@@ -187,13 +187,13 @@ func Interfaces(c Caller) ([]model.Iface, error) {
 	return out, nil
 }
 
-// Filesystems returns the guest's real mounted filesystems.
+// Filesystems returns the real mounted filesystems of the guest.
 //
-// Ubuntu is the reason for the filtering here: a stock 24.04 box reports
-// every snap as a squashfs loop mount sitting at exactly 100% full, which
-// would drown the real disks in a dashboard. Windows needs it too: mounted
-// ISOs report as CDFS/UDF at 100% full, and the letterless EFI and recovery
-// partitions report their volume label ("System Reserved") as the
+// The filter exists for Ubuntu. A stock 24.04 install reports every
+// snap as a squashfs loop mount at 100% full. These rows fill the
+// dashboard and hide the real disks. Windows needs the filter too.
+// Mounted ISOs report as CDFS or UDF at 100% full. Volumes without a
+// drive letter report their volume label ("System Reserved") as the
 // mountpoint.
 func Filesystems(c Caller) ([]model.Filesystem, error) {
 	var r []struct {
@@ -222,11 +222,11 @@ func Filesystems(c Caller) ([]model.Filesystem, error) {
 	return out, nil
 }
 
-// virtualIfacePrefixes are interfaces created by container and VM runtimes.
-// They're real, they're just never the answer to "what IP is this box on".
-// Matched case-insensitively against the lowercased name: Linux names are
-// lowercase, but Windows reports "vEthernet (WSL)" and Hyper-V switches that
-// the case-sensitive list never caught.
+// virtualIfacePrefixes lists the name prefixes of the interfaces that
+// container and VM runtimes create. These interfaces are real. But
+// they never carry the IP that a user needs to reach the guest. The
+// match lowercases the name first. Linux names are lowercase. Windows
+// reports "vEthernet (WSL)" and Hyper-V switches with capital letters.
 var virtualIfacePrefixes = []string{
 	"docker", "br-", "veth", "virbr", "cni", "flannel", "cali", "tap", "kube",
 	"loopback",
@@ -236,7 +236,7 @@ func isVirtualIface(name, mac string) bool {
 	if name == "lo" || strings.HasPrefix(name, "lo:") {
 		return true
 	}
-	// An all-zero MAC means loopback or something equally uninteresting.
+	// An empty or all-zero MAC marks loopback or another virtual interface.
 	if mac == "" || mac == "00:00:00:00:00:00" {
 		return true
 	}
@@ -249,8 +249,9 @@ func isVirtualIface(name, mac string) bool {
 	return false
 }
 
-// skipAddr drops addresses that tell you nothing: loopback, and IPv6
-// link-local, which every interface has and nobody ever connects to.
+// skipAddr drops the addresses that no reader needs: loopback,
+// unspecified, and IPv6 link-local. Every interface has a link-local
+// address. No connection uses it.
 func skipAddr(addr string) bool {
 	ip := net.ParseIP(addr)
 	if ip == nil {
@@ -268,12 +269,12 @@ var pseudoFilesystems = map[string]bool{
 	"hugetlbfs": true, "proc": true, "sysfs": true, "devpts": true,
 	"binfmt_misc": true, "fusectl": true, "nsfs": true, "fuse.snapfuse": true,
 	"iso9660": true,
-	// Windows reports mounted optical media as CDFS or UDF. Like iso9660
-	// they always read 100% full and drown the real disks.
+	// Windows reports mounted optical media as CDFS or UDF. Like iso9660,
+	// they always show 100% full and hide the real disks.
 	"cdfs": true, "udf": true,
 }
 
-// pseudoMounts are trees that are never worth a row in the table.
+// pseudoMounts lists the mount trees that never get a row in the table.
 var pseudoMounts = []string{"/snap/", "/sys/", "/proc/", "/dev/", "/run/", "/var/lib/docker/"}
 
 func skipFilesystem(fsType, mount string, total uint64) bool {
@@ -288,11 +289,11 @@ func skipFilesystem(fsType, mount string, total uint64) bool {
 			return true
 		}
 	}
-	// Windows qemu-ga reports the volume label as the mountpoint for
-	// volumes without a drive letter — the EFI and recovery partitions
-	// show up as "System Reserved". They're system plumbing, never
-	// storage the user interacts with, so they get no row. Real volumes
-	// are either Unix paths or Windows drive letters ("C:\").
+	// Windows qemu-ga reports the volume label as the mountpoint for a
+	// volume without a drive letter. The EFI and recovery partitions show
+	// as "System Reserved". These volumes hold system files. The user
+	// never stores data there, so they get no row. A real mountpoint is a
+	// Unix path or a Windows drive letter ("C:\").
 	if !strings.HasPrefix(mount, "/") && !isDriveLetterPath(mount) {
 		return true
 	}

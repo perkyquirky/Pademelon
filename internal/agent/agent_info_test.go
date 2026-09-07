@@ -22,7 +22,7 @@ func TestInfoReturnsVersionAndCommands(t *testing.T) {
 
 	// An agent too old for the command answers with an error envelope,
 	// not an empty everything — the caller needs to see that as an error
-	// so the UI can show a dash instead of a made-up blank.
+	// so the UI can show a dash instead of a blank.
 	tooOld := `{"error":{"class":"CommandNotFound","desc":"The command guest-info has not been found"}}`
 	if _, _, err := Info(staticCaller(tooOld)); err == nil {
 		t.Error("Info should error on an error envelope")

@@ -7,9 +7,9 @@ import (
 )
 
 // realInterfaceReply is an actual guest-network-get-interfaces reply from an
-// Ubuntu 24.04 VM running Docker. It's the reason interface filtering exists:
-// seven interfaces, and exactly one of them is the answer to "what IP is this
-// box on".
+// Ubuntu 24.04 VM running Docker. It is the reason interface filtering
+// exists: seven interfaces, and exactly one of them carries the IP that
+// reaches the machine.
 const realInterfaceReply = `{"return":[
 {"name":"lo","ip-addresses":[{"ip-address-type":"ipv4","ip-address":"127.0.0.1","prefix":8},{"ip-address-type":"ipv6","ip-address":"::1","prefix":128}],"hardware-address":"00:00:00:00:00:00"},
 {"name":"ens3","ip-addresses":[{"ip-address-type":"ipv4","ip-address":"192.168.1.13","prefix":24},{"ip-address-type":"ipv6","ip-address":"fe80::2a0:98ff:fe63:1795","prefix":64}],"hardware-address":"00:a0:98:63:17:95"},
@@ -65,7 +65,7 @@ func TestInterfacesFiltersNoise(t *testing.T) {
 
 func TestFilesystemsDropsSnapsAndPseudo(t *testing.T) {
 	// An Ubuntu box with snaps installed. Every squashfs sits at 100% full
-	// and would swamp the real disks in the table.
+	// and would fill and hide the real disks in the table.
 	const reply = `{"return":[
 {"name":"dm-0","mountpoint":"/","type":"ext4","used-bytes":8000000000,"total-bytes":40000000000},
 {"name":"loop0","mountpoint":"/snap/core22/1122","type":"squashfs","used-bytes":78000000,"total-bytes":78000000},
@@ -117,8 +117,8 @@ func TestAgentErrorIsReported(t *testing.T) {
 
 // realWindowsFSReply is an actual guest-get-fsinfo reply from a Windows
 // Server 2022 VM with two install ISOs mounted and the usual System
-// Reserved volumes. It's the reason Windows filtering exists: the ISOs
-// read 100% full and the letterless system partitions would swamp the one
+// Reserved volumes. It is the reason Windows filtering exists: the ISOs
+// read 100% full and the letterless system partitions would hide the one
 // real disk.
 const realWindowsFSReply = `{"return":[
 {"name":"\\\\?\\Volume{e22d3098-a70b-11f1-abc2-806e6f6e6963}\\","total-bytes":877373440,"mountpoint":"E:\\","used-bytes":877373440,"type":"CDFS"},

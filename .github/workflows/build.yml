@@ -1,5 +1,6 @@
-# Literally have no idea wtf I am doing
-# Hope this works
+# CI for Pademelon: tests, format check, the write-zone greps, and a
+# container build published to ghcr.io from the main branch and tags.
+# The image and this workflow were hand-tested against a live TrueNAS host.
 
 name: build
 
@@ -33,7 +34,7 @@ jobs:
           # internal/actions, where every verb is on a reviewed allowlist.
           # guest-exec is still banned everywhere, no exceptions.
           # 1. Outside internal/actions: every write verb fails, except the
-          #    balloon-stats knob (DomainSetMemoryStatsPeriod), which sets
+          #    balloon-stats switch (DomainSetMemoryStatsPeriod), which sets
           #    no memory and enters no guest — see README2 "About the
           #    permissions".
           if grep -rnE '\.Domain(Create|Destroy|Undefine|Shutdown|Reboot|Suspend|Resume|SetMemory|AttachDevice|DetachDevice)[A-Za-z]*\(' \

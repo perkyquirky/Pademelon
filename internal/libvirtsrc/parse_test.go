@@ -10,7 +10,7 @@ import (
 
 // loadFixture parses one of the testdata domain XMLs. Both fixtures are
 // sanitized copies of real dumpxml output from a TrueNAS box — the shapes
-// libvirt actually hands us, not idealised ones.
+// libvirt actually sends, not idealised ones.
 func loadFixture(t *testing.T, name string) domainXML {
 	t.Helper()
 	raw, err := os.ReadFile("testdata/" + name)
@@ -58,7 +58,7 @@ func TestParseDomainXMLWindowsFiltersCdroms(t *testing.T) {
 	disks := diskShapes(&dx)
 
 	// Two ISO cdroms plus one zvol: only the zvol is storage. The cdroms
-	// would otherwise show as mystery disks nobody can mount.
+	// would otherwise show as disks that no one can mount.
 	if len(disks) != 1 || disks[0].Dev != "vda" {
 		t.Fatalf("disks = %+v, want only the vda zvol", disks)
 	}
@@ -90,7 +90,7 @@ func TestBytesPerSecond(t *testing.T) {
 	}
 
 	// Counter went backwards: the VM restarted, and the old sample belongs
-	// to a previous lifetime.
+	// to the previous QEMU process.
 	if _, ok := bytesPerSecond(3000, 1000, sec); ok {
 		t.Error("backwards counter should report not-ok")
 	}

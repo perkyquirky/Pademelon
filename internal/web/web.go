@@ -4,8 +4,8 @@
 // the cache, and nothing a request carries ever reaches libvirt — the
 // poller gathers, handlers pour. /api/vm/{name}/xml is the one route with
 // a domain name in the URL; it serves the poller's cached copy of the XML
-// and 404s for any name the poller didn't report, so the old "domain names
-// never come from a URL" rule still holds where it matters. POST
+// and 404s for any name the poller did not report, so the old "domain
+// names never come from a URL" rule still holds where it matters. POST
 // /api/refresh asks the poll loop for an early poll through a debounced
 // channel; the loop, not the request, decides when libvirt is polled.
 // A private tier (see auth.go) sits behind a static token; it is only
@@ -23,6 +23,7 @@ import (
 
 	"pademelon/internal/actions"
 	"pademelon/internal/model"
+	"pademelon/internal/truenas"
 )
 
 //go:embed index.html
@@ -42,6 +43,7 @@ type Server struct {
 	auth    authState
 	nudge   chan<- struct{}
 	actions ActionSubmitter
+	truenas TruenasStatusProvider
 }
 
 // ActionSubmitter is the slice of the actions store the web layer uses.
@@ -50,11 +52,21 @@ type ActionSubmitter interface {
 	Submit(domain string, action actions.Action) (*actions.Job, error)
 	List() []actions.Job
 	ShutdownAll() (planned []string, skipped []string)
+	SubmitRestore(domain string, opts actions.RestoreOpts) (*actions.Job, error)
+	SubmitDelete(domain, snapshotID string) (*actions.Job, error)
 }
 
-// Config is everything New needs. Zero-value fields behave sanely: an
-// empty theme falls back to the default, an empty token disables auth, and
-// a nil Actions disables every action route.
+// TruenasStatusProvider is the slice of the middleware client the web
+// layer uses: its status, and nothing else. Nil means the integration is
+// off, which the capabilities endpoint advertises and the UI believes.
+type TruenasStatusProvider interface {
+	Status() truenas.Status
+}
+
+// Config is everything New needs. Zero-value fields have safe defaults:
+// an empty theme falls back to the default, an empty token disables auth,
+// a nil Actions disables every action route, and a nil Truenas means the
+// middleware integration is off.
 type Config struct {
 	Cache   *model.Cache
 	Log     *slog.Logger
@@ -62,15 +74,17 @@ type Config struct {
 	Token   string
 	Nudge   chan<- struct{}
 	Actions ActionSubmitter
+	Truenas TruenasStatusProvider
 }
 
-// New returns a Server reading from cache. The theme is the default colour
-// theme sent to browsers that haven't picked one themselves; validate it
-// with ValidTheme before calling. An empty token disables auth entirely —
-// the private tier is not even registered without one. Nudge is the
-// channel the refresh route pokes; nil disables the poke. Actions is the
-// action job store; nil keeps every action route unregistered, which is
-// how a read-only deployment stays verifiably read-only at runtime.
+// New returns a Server reading from cache. The theme is the default
+// colour theme sent to browsers that have not picked one themselves;
+// validate it with ValidTheme before calling. An empty token disables
+// auth entirely — the private tier is not even registered without one.
+// Nudge is the channel the refresh route pokes; nil disables the poke.
+// Actions is the action job store; nil keeps every action route
+// unregistered, which is how a read-only deployment stays verifiably
+// read-only at runtime.
 func New(cfg Config) *Server {
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
@@ -79,12 +93,18 @@ func New(cfg Config) *Server {
 		cfg.Theme = DefaultTheme
 	}
 	// A typed-nil pointer (a nil *Store inside the interface) is the
-	// classic Go trap: the interface isn't nil, so the routes register,
+	// classic Go trap: the interface is not nil, so the routes register,
 	// and calling through them panics. Seen live in production — treat
-	// any nil-backed submitter as disabled.
+	// any nil-backed submitter as disabled. The same guard covers the
+	// middleware client, whose main-side variable is a *truenas.Client.
 	if cfg.Actions != nil {
 		if v := reflect.ValueOf(cfg.Actions); v.Kind() == reflect.Ptr && v.IsNil() {
 			cfg.Actions = nil
+		}
+	}
+	if cfg.Truenas != nil {
+		if v := reflect.ValueOf(cfg.Truenas); v.Kind() == reflect.Ptr && v.IsNil() {
+			cfg.Truenas = nil
 		}
 	}
 	return &Server{
@@ -94,6 +114,7 @@ func New(cfg Config) *Server {
 		auth:    authState{token: cfg.Token, failures: make(map[string]*authFailure)},
 		nudge:   cfg.Nudge,
 		actions: cfg.Actions,
+		truenas: cfg.Truenas,
 	}
 }
 
@@ -106,10 +127,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/refresh", s.handleRefresh)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /api/capabilities", s.handleCapabilities)
+	mux.HandleFunc("GET /api/truenas", s.handleTruenasStatus)
+	mux.HandleFunc("GET /api/vm/{name}/snapshots", s.handleVMSnapshots)
 	if s.actions != nil {
 		mux.Handle("POST /api/vm/{name}/{action}", s.requireToken(csrfGuard(http.HandlerFunc(s.handleSubmitAction))))
 		mux.Handle("POST /api/actions/shutdown-all", s.requireToken(csrfGuard(http.HandlerFunc(s.handleShutdownAll))))
 		mux.Handle("GET /api/actions", s.requireToken(http.HandlerFunc(s.handleJobs)))
+		mux.Handle("POST /api/vm/{name}/snapshot/{snapshot}/restore", s.requireToken(csrfGuard(http.HandlerFunc(s.handleRestore))))
+		mux.Handle("DELETE /api/vm/{name}/snapshot/{snapshot}", s.requireToken(csrfGuard(http.HandlerFunc(s.handleDelete))))
 	}
 	if s.auth.token != "" {
 		mux.Handle("GET /api/auth/check", s.requireToken(http.HandlerFunc(s.handleAuthCheck)))
@@ -119,8 +144,9 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	// GET / is the only path the mux pattern "GET /" won't match exactly, so
-	// send anything unknown to a 404 rather than silently serving the page.
+	// GET / is the only path the mux pattern "GET /" will not match
+	// exactly, so send anything unknown to a 404 rather than silently
+	// serving the page.
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
@@ -146,9 +172,8 @@ func (s *Server) handleVMs(w http.ResponseWriter, r *http.Request) {
 
 // handleVMXML serves the raw domain XML for one VM. The XML comes straight
 // from the cache — the poller already fetched it on its last round — so a
-// request never reaches libvirt, and a domain the poller hasn't reported
-// gets a 404. That guard is what keeps a guessed name from being worth
-// anything.
+// request never reaches libvirt, and a domain the poller has not reported
+// gets a 404. A guessed name gets nothing.
 func (s *Server) handleVMXML(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
 	for _, vm := range s.cache.Get().VMs {
@@ -169,7 +194,7 @@ func (s *Server) handleVMXML(w http.ResponseWriter, r *http.Request) {
 // handleRefresh pokes the poll loop for an out-of-band poll. It is a
 // debounced nudge, not a command: the channel holds one slot, the poll
 // loop drops nudges that arrive too soon after the previous poll, and a
-// wedged guest can never turn this into a slow page load.
+// stuck guest can never turn this into a slow page load.
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

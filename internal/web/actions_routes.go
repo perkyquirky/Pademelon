@@ -3,7 +3,7 @@ package web
 // actions_routes.go is the HTTP face of internal/actions: submit a verb,
 // list the jobs, bulk shutdown. Every route here sits behind requireToken
 // AND csrfGuard, and the whole tier only exists when -allow-actions is on —
-// a read-only deployment doesn't just hide these routes, it never
+// a read-only deployment does not just hide these routes, it never
 // registers them.
 
 import (
@@ -27,7 +27,7 @@ const (
 // SameSite=Lax, which already keeps it off cross-site POSTs; requiring a
 // custom header as well means a drive-by needs a CORS preflight, and
 // Pademelon never answers preflights. The page's fetches set the header;
-// nothing else bothers to.
+// nothing else sends it.
 func csrfGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(CSRFHeaderName) == "" {
@@ -61,9 +61,14 @@ func (s *Server) handleSubmitAction(w http.ResponseWriter, r *http.Request) {
 		s.actionJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	case errors.Is(err, actions.ErrInFlight):
-		// 409 with the job that's already running — the caller can watch
-		// that one instead of starting a twin.
+		// 409 with the job that is already running — the caller can
+		// watch that one instead of starting a twin.
 		s.actionJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "job": job})
+		return
+	case errors.Is(err, actions.ErrMiddlewareOff):
+		// The integration is off; the page should not have offered the
+		// button, so this is "service unavailable", not a client error.
+		s.actionJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	default:
 		s.log.Error("action submit failed", "domain", name, "action", action, "err", err)
@@ -72,6 +77,81 @@ func (s *Server) handleSubmitAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.log.Info("action submitted", "domain", name, "action", action, "job", job.ID)
+	s.actionJSON(w, http.StatusAccepted, job)
+}
+
+// handleRestore is the §8.6 two-path entry point. The body carries the
+// mode and the acknowledgement the dialog computed; the store's submit
+// validation is the second lock on the dangerous combinations.
+func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
+	name, snapshot := r.PathValue("name"), r.PathValue("snapshot")
+	var body struct {
+		Mode       string `json:"mode"`
+		StartAfter bool   `json:"startAfter"`
+		Ack        bool   `json:"ack"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		s.actionJSON(w, http.StatusBadRequest, map[string]string{"error": "restore needs a JSON body: {mode, startAfter, ack}"})
+		return
+	}
+
+	job, err := s.actions.SubmitRestore(name, actions.RestoreOpts{
+		SnapshotID: snapshot,
+		Mode:       body.Mode,
+		StartAfter: body.StartAfter,
+		Ack:        body.Ack,
+	})
+	switch {
+	case err == nil:
+	case errors.Is(err, actions.ErrUnknownDomain), errors.Is(err, actions.ErrUnknownSnapshot):
+		http.NotFound(w, r)
+		return
+	case errors.Is(err, actions.ErrBadRestore):
+		s.actionJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	case errors.Is(err, actions.ErrInvalidState):
+		s.actionJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
+		return
+	case errors.Is(err, actions.ErrInFlight):
+		s.actionJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "job": job})
+		return
+	case errors.Is(err, actions.ErrMiddlewareOff):
+		s.actionJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
+	default:
+		s.log.Error("restore submit failed", "domain", name, "snapshot", snapshot, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	s.log.Info("restore submitted", "domain", name, "snapshot", snapshot, "mode", body.Mode, "job", job.ID)
+	s.actionJSON(w, http.StatusAccepted, job)
+}
+
+// handleDelete queues a snapshot deletion. One danger confirm on the
+// page, one id guard here, and the audit view keeps the record.
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	name, snapshot := r.PathValue("name"), r.PathValue("snapshot")
+
+	job, err := s.actions.SubmitDelete(name, snapshot)
+	switch {
+	case err == nil:
+	case errors.Is(err, actions.ErrUnknownDomain), errors.Is(err, actions.ErrUnknownSnapshot):
+		http.NotFound(w, r)
+		return
+	case errors.Is(err, actions.ErrInFlight):
+		s.actionJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "job": job})
+		return
+	case errors.Is(err, actions.ErrMiddlewareOff):
+		s.actionJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
+	default:
+		s.log.Error("delete submit failed", "domain", name, "snapshot", snapshot, "err", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	s.log.Info("delete submitted", "domain", name, "snapshot", snapshot, "job", job.ID)
 	s.actionJSON(w, http.StatusAccepted, job)
 }
 

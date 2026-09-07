@@ -259,7 +259,7 @@ func TestSecureCookieOnTLS(t *testing.T) {
 	s := newTestServer("tok-123")
 	req := httptest.NewRequest("GET", "/api/auth/check", nil)
 	req.TLS = &tls.ConnectionState{} // any non-nil TLS state counts as HTTPS
-	// (httptest.NewRequest has no RemoteAddr set; the middleware tolerates it.)
+	// (httptest.NewRequest sets no RemoteAddr; the auth middleware tolerates that.)
 	req.RemoteAddr = "203.0.113.7:4444"
 	req.Header.Set("Authorization", "Bearer tok-123")
 	rec := httptest.NewRecorder()

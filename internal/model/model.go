@@ -7,21 +7,22 @@ import (
 	"time"
 )
 
-// AgentState says whether we can talk to the QEMU guest agent inside a VM.
+// AgentState says whether Pademelon can talk to the QEMU guest agent inside a VM.
 type AgentState string
 
 const (
 	// AgentAbsent means the domain XML has no guest agent channel at all.
-	// Shouldn't happen on TrueNAS, which adds one to every VM, but handle it.
+	// This should not happen on TrueNAS, which adds one to every VM, but
+	// handle it.
 	AgentAbsent AgentState = "absent"
 
-	// AgentDisconnected means the channel is there but nothing is listening
-	// inside the guest — qemu-guest-agent isn't installed or isn't running.
-	// We read this straight from the XML and skip the agent calls entirely,
-	// so an agentless VM costs us nothing.
+	// AgentDisconnected means the channel is there but nothing listens
+	// inside the guest: qemu-guest-agent is not installed or is not
+	// running. The poller reads this state straight from the XML and skips
+	// the agent calls entirely, so an agentless VM costs nothing.
 	AgentDisconnected AgentState = "disconnected"
 
-	// AgentOK means we asked it something and it answered.
+	// AgentOK means the poller asked the agent something and it answered.
 	AgentOK AgentState = "ok"
 
 	// AgentError means the channel claimed to be connected but the call
@@ -38,15 +39,15 @@ type Iface struct {
 	Virtual bool     `json:"virtual"` // loopback, docker bridge, veth, etc
 }
 
-// Disk is one virtual disk, as the host side sees it. Shape comes from the
-// domain XML; the rates come from libvirt's cumulative block counters,
-// turned into bytes-per-second the same way the CPU column is.
+// Disk is one virtual disk, as the host side sees it. The shape comes from
+// the domain XML. The rates come from libvirt's cumulative block counters,
+// converted to bytes-per-second the same way as the CPU column.
 type Disk struct {
 	Dev           string `json:"dev"`              // vda, sdb, ...
 	Source        string `json:"source,omitempty"` // zvol path or file path
 	Format        string `json:"format,omitempty"` // raw, qcow2, ...
 	Bus           string `json:"bus,omitempty"`    // virtio, sata, ...
-	CapacityBytes uint64 `json:"capacityBytes"`    // 0 when we couldn't ask
+	CapacityBytes uint64 `json:"capacityBytes"`    // 0 when unknown
 	RdBytesPS     uint64 `json:"rdBytesPs"`
 	WrBytesPS     uint64 `json:"wrBytesPs"`
 	RatesKnown    bool   `json:"ratesKnown"` // false on the first poll, no delta yet
@@ -74,7 +75,7 @@ type Filesystem struct {
 	TotalBytes uint64 `json:"totalBytes"`
 }
 
-// UsedPercent is how full this filesystem is, 0 if we can't tell.
+// UsedPercent is how full this filesystem is, 0 when unknown.
 func (f Filesystem) UsedPercent() float64 {
 	if f.TotalBytes == 0 {
 		return 0
@@ -82,7 +83,30 @@ func (f Filesystem) UsedPercent() float64 {
 	return float64(f.UsedBytes) / float64(f.TotalBytes) * 100
 }
 
-// VM is everything we know about one virtual machine.
+// ZfsSnapshot is one zvol snapshot as TrueNAS sees it. Pademelon-made
+// snapshots and periodic-task ones are the same ZFS objects — the name is
+// the only difference (pademelon-<vm>-<ts> versus auto-*), which is what
+// makes them visible and manageable in the TrueNAS UI too.
+type ZfsSnapshot struct {
+	ID         string `json:"id"`      // dataset@name
+	Dataset    string `json:"dataset"` // nvme/vms/alpine_test-bxuwle
+	Name       string `json:"name"`    // snapshot name alone
+	Created    int64  `json:"created"` // epoch seconds
+	Used       uint64 `json:"used"`    // copy-on-write divergence, bytes
+	Referenced uint64 `json:"referenced"`
+}
+
+// TruenasGather rides each Snapshot (the poll result) and says how the
+// middleware snapshot gathering went this round. Nil means the
+// integration is off.
+type TruenasGather struct {
+	Connected bool      `json:"connected"`
+	Version   string    `json:"version,omitempty"`
+	Error     string    `json:"error,omitempty"` // this round's gather failure, if any
+	At        time.Time `json:"at"`
+}
+
+// VM is everything Pademelon knows about one virtual machine.
 type VM struct {
 	// Identity. Domain is what libvirt calls it ("12_test"); ID and Name are
 	// that split apart, because TrueNAS names domains "<vm_id>_<vm_name>".
@@ -98,7 +122,7 @@ type VM struct {
 	VCPUs       int     `json:"vcpus"`
 	MemTotalKiB uint64  `json:"memTotalKiB"`
 	MemUsedKiB  uint64  `json:"memUsedKiB"`
-	MemKnown    bool    `json:"memKnown"` // false when the balloon told us nothing
+	MemKnown    bool    `json:"memKnown"` // false when the balloon gave no reading
 	CPUPercent  float64 `json:"cpuPercent"`
 	CPUKnown    bool    `json:"cpuKnown"` // false on the first poll, no delta yet
 
@@ -109,11 +133,12 @@ type VM struct {
 	OS         string     `json:"os,omitempty"`
 	Kernel     string     `json:"kernel,omitempty"`
 
-	// AgentVersion is what guest-info calls itself, e.g. "8.2" — answers
-	// "why doesn't this VM show X?" in one glance. ClockDriftSeconds is the
-	// guest clock minus the host clock at poll time; positive means the
-	// guest is ahead. A paused or recently restored VM drifts; a healthy
-	// one sits inside a second or two of noise.
+	// AgentVersion is what guest-info calls itself, for example "8.2" — it
+	// answers "why doesn't this VM show X?" in one glance.
+	// ClockDriftSeconds is the guest clock minus the host clock at poll
+	// time; positive means the guest is ahead. A paused or recently
+	// restored VM drifts; a healthy one stays within a second or two of
+	// noise.
 	AgentVersion      string  `json:"agentVersion,omitempty"`
 	ClockDriftSeconds float64 `json:"clockDriftSeconds"`
 	ClockDriftKnown   bool    `json:"clockDriftKnown"`
@@ -121,16 +146,23 @@ type VM struct {
 	Interfaces  []Iface      `json:"interfaces"`
 	Filesystems []Filesystem `json:"filesystems"`
 
+	// Snapshots holds the zvol snapshots of this VM's disk datasets,
+	// gathered by the poll loop from the TrueNAS middleware when the
+	// integration is on. Deliberately not in the JSON — a dataset with
+	// years of periodic snapshots would bloat /api/vms, which is fetched
+	// every 1.5s; only /api/vm/{name}/snapshots serves them.
+	Snapshots []ZfsSnapshot `json:"-"`
+
 	// Host-side shapes from the domain XML, with rates filled in while the
 	// VM runs. These work whether or not the guest has an agent.
 	Disks []Disk `json:"disks"`
 	Nics  []Nic  `json:"nics"`
 
 	// XML is the raw domain definition from the last poll, served by
-	// /api/vm/{name}/xml. Storing it keeps the architecture honest: the
-	// poller talks to libvirt, handlers read the cache. It is deliberately
-	// not in the JSON — only that route serves it, and shipping every
-	// VM's full XML on every /api/vms fetch would be dead weight.
+	// /api/vm/{name}/xml. Storing it keeps the rule true: the poller talks
+	// to libvirt, and handlers read the cache. It is deliberately not in
+	// the JSON — only that route serves it, and shipping every VM's full
+	// XML on every /api/vms fetch would waste bytes.
 	XML string `json:"-"`
 
 	Updated time.Time `json:"updated"`
@@ -145,8 +177,9 @@ func (v VM) MemUsedPercent() float64 {
 	return float64(v.MemUsedKiB) / float64(v.MemTotalKiB) * 100
 }
 
-// RealInterfaces drops the noise — loopback, docker bridges, veth pairs.
-// A VM running Docker reports a dozen interfaces and you care about one.
+// RealInterfaces drops the noise: loopback, docker bridges, veth pairs.
+// A VM that runs Docker reports a dozen interfaces, and only one matters
+// to the user.
 func (v VM) RealInterfaces() []Iface {
 	out := make([]Iface, 0, len(v.Interfaces))
 	for _, i := range v.Interfaces {
@@ -157,8 +190,8 @@ func (v VM) RealInterfaces() []Iface {
 	return out
 }
 
-// PrimaryIPs is the short answer to "what's this box's address" — every
-// non-virtual IPv4 we found, in interface order.
+// PrimaryIPs answers "what is this box's address" in short form: every
+// non-virtual IPv4 address, in interface order.
 func (v VM) PrimaryIPs() []string {
 	var out []string
 	for _, i := range v.RealInterfaces() {
@@ -169,16 +202,17 @@ func (v VM) PrimaryIPs() []string {
 
 // Snapshot is one complete poll result, and what the JSON API hands out.
 type Snapshot struct {
-	VMs       []VM      `json:"vms"`
-	Polled    time.Time `json:"polled"`
-	PollMS    int64     `json:"pollMs"`
-	Connected bool      `json:"connected"`
-	Error     string    `json:"error,omitempty"`
+	VMs       []VM           `json:"vms"`
+	Polled    time.Time      `json:"polled"`
+	PollMS    int64          `json:"pollMs"`
+	Connected bool           `json:"connected"`
+	Error     string         `json:"error,omitempty"`
+	Truenas   *TruenasGather `json:"truenas,omitempty"` // nil when the middleware integration is off
 }
 
 // Cache holds the last good Snapshot. The poller writes it, HTTP handlers
-// read it. We never poll on a request — a slow guest agent must not turn
-// into a slow page load.
+// read it. The server never polls on a request — a slow guest agent must
+// not turn into a slow page load.
 type Cache struct {
 	mu   sync.RWMutex
 	snap Snapshot

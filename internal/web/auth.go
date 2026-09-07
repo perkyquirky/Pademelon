@@ -2,17 +2,17 @@ package web
 
 // auth.go is the static-token layer from IDEAS-EXPLORED.md §5. One shared
 // secret, compared on every request with crypto/subtle; no sessions, no
-// accounts, no database. The browser-side story: the login form sends the
+// accounts, no database. The browser-side flow: the login form sends the
 // token once as an Authorization: Bearer header, the server responds by
 // issuing a session cookie, and from then on the cookie rides along
 // automatically on every fetch.
 //
-// The cookie's value is the token itself. That is deliberate: it makes the
-// design stateless (restarts never log anyone out) and makes token rotation
-// the revoke switch — change the token and every cookie everywhere is dead
-// instantly. HttpOnly keeps the value away from page JavaScript; SameSite
-// Lax keeps it off cross-site requests, which is what makes cookies safe
-// here where they were the classic CSRF hole.
+// The cookie's value is the token itself. That is deliberate: it makes
+// the design stateless (restarts never log anyone out) and makes token
+// rotation the revoke switch. Change the token, and every cookie
+// everywhere stops working instantly. HttpOnly keeps the value away from
+// page JavaScript; SameSite Lax keeps it off cross-site requests, which
+// makes cookies safe here, where they were the classic CSRF hole.
 
 import (
 	"crypto/subtle"
@@ -32,7 +32,7 @@ import (
 const sessionCookieName = "pademelon_session"
 
 // authState holds the private-tier gate. token == "" means auth is off and
-// requireToken is never registered; the zero-effort path stays exactly the
+// requireToken is never registered; the default path stays exactly the
 // pre-auth server.
 type authState struct {
 	token string
@@ -43,7 +43,7 @@ type authState struct {
 
 // authFailure tracks consecutive failed attempts from one source. The count
 // drives exponential backoff; resetAt is what pruning uses to forget
-// sources that gave up.
+// sources that stopped trying.
 type authFailure struct {
 	count       int
 	resetAt     time.Time
@@ -64,8 +64,8 @@ func backoffFor(count int) time.Duration {
 // throttleFailed records a failed attempt from ip and makes the caller wait
 // out an escalating delay before the 401 is sent: base, 2×, 4× … capped at
 // AuthBackoffMax. A success clears the counter (clearFailures), so one
-// fat-fingered attempt never leaves a human on minutes-long delays. Stale
-// entries are pruned as we go so the map cannot grow without bound.
+// mistyped attempt never leaves a human on minutes-long delays. Stale
+// entries are pruned during the pass so the map cannot grow without bound.
 func (a *authState) throttleFailed(ip string, now time.Time) time.Duration {
 	a.mu.Lock()
 	for key, f := range a.failures {
@@ -186,7 +186,7 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 // handleCapabilities tells the page what this instance offers, so the UI
 // and the server can never disagree (IDEAS-EXPLORED.md §6.2). It is
 // deliberately public: the page needs it before it can know whether to
-// show the login affordance at all.
+// show the login button at all.
 func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -196,10 +196,11 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 		"actions":      s.actions != nil,
 		"authRequired": s.auth.token != "",
 		"exec":         false, // permanently false for now; see §4
+		"truenas":      s.truenas != nil,
 	})
 }
 
-// handleAuthCheck is the boring endpoint the login form fetches. It exists
+// handleAuthCheck is the simple endpoint the login form fetches. It exists
 // because the read tier is public: without a route that always requires the
 // token, the form would have nothing to validate against. The middleware
 // has already authenticated the request by the time this runs.
@@ -223,8 +224,9 @@ func (s *Server) clearSessionCookie(r *http.Request) *http.Cookie {
 
 // handleAuthLogout clears the session cookie, logging the browser out. It
 // is a GET to keep the house GET-only rule intact; the worst a cross-site
-// top-level navigation could do is log you out, which SameSite=Lax already
-// requires a real navigation for. Annoyance-class, not security-class.
+// top-level navigation can do is log the browser out, which SameSite=Lax
+// already requires a real navigation for. It is an annoyance, not a
+// security risk.
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, s.clearSessionCookie(r))
 	s.log.Info("auth: logged out", "remote", remoteIP(r))

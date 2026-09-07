@@ -14,8 +14,8 @@ import (
 
 // TestDockerfileHealthcheckTimeoutExceedsProbe keeps the Dockerfile's
 // HEALTHCHECK and clocks.ProbeTimeout from drifting apart: the self-probe
-// must give up before Docker kills the check, or Docker starts failing
-// checks that would have passed. See clocks.ProbeTimeout.
+// must give up before Docker kills the check, or Docker fails checks
+// that would otherwise pass. See clocks.ProbeTimeout.
 func TestDockerfileHealthcheckTimeoutExceedsProbe(t *testing.T) {
 	data, err := os.ReadFile("../../Dockerfile")
 	if errors.Is(err, fs.ErrNotExist) {

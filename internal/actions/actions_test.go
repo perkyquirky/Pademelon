@@ -1,7 +1,9 @@
 package actions
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
@@ -16,7 +18,7 @@ import (
 
 // fakeDomains records which verbs were called and answers agent commands
 // from a canned reply/error, so the shutdown ladder can be walked without
-// a hypervisor in sight. getInfoStates feeds DomainGetInfo a staged
+// a hypervisor. getInfo feeds DomainGetInfo a staged
 // sequence (repeating the last entry), so the reboot wait loop can be
 // walked through "still running" → "shut off".
 type fakeDomains struct {
@@ -297,7 +299,7 @@ func TestSingleFlight(t *testing.T) {
 	if !errors.Is(err, ErrInFlight) {
 		t.Fatalf("second submit err = %v, want ErrInFlight", err)
 	}
-	// Release the first job so the goroutine doesn't leak past the test.
+	// Release the first job so the goroutine does not leak past the test.
 	close(fds.blockCreate)
 }
 
@@ -371,5 +373,375 @@ func TestShutdownAllPlansAndSkips(t *testing.T) {
 	}
 	if len(skipped) != 2 {
 		t.Errorf("skipped = %v, want the agentless and paused entries", skipped)
+	}
+}
+
+// fakeMiddleware is the MiddlewareClient surface the snapshot, restore
+// and delete jobs need, canned: it records every call and fails on demand.
+type fakeMiddleware struct {
+	creates     [][2]string // {dataset, name}
+	failFrom    int         // fail the Nth create onward; 0 = never fail
+	err         error
+	rollbacks   []string // "dataset@name|recursive=<bool>"
+	rollbackErr error
+	deletes     []string // ids handed to delete
+	deleteErr   error
+	deleteGone  bool // pretend the snapshot was already gone
+}
+
+func (f *fakeMiddleware) CreateSnapshot(_ context.Context, dataset, name string) (string, error) {
+	f.creates = append(f.creates, [2]string{dataset, name})
+	if f.failFrom > 0 && len(f.creates) >= f.failFrom {
+		return "", f.err
+	}
+	return dataset + "@" + name, nil
+}
+
+func (f *fakeMiddleware) RollbackSnapshot(_ context.Context, dataset, name string, recursive bool) error {
+	f.rollbacks = append(f.rollbacks, fmt.Sprintf("%s@%s|recursive=%v", dataset, name, recursive))
+	if f.rollbackErr != nil {
+		return f.rollbackErr
+	}
+	return nil
+}
+
+func (f *fakeMiddleware) DeleteSnapshot(_ context.Context, dataset, name string) (bool, error) {
+	f.deletes = append(f.deletes, dataset+"@"+name)
+	if f.deleteErr != nil {
+		return false, f.deleteErr
+	}
+	return !f.deleteGone, nil
+}
+
+// snapshotTestVM is a VM with one zvol and one file-backed disk — the
+// gather-and-skip shape the snapshot job must respect.
+func snapshotTestVM(agent model.AgentState, state string) model.VM {
+	return model.VM{
+		Domain: "14_alpine_test", Name: "alpine_test", State: state,
+		Running: state == "running", Agent: agent,
+		Disks: []model.Disk{
+			{Dev: "vda", Source: "/dev/zvol/nvme/vms/alpine_test-bxuwle"},
+			{Dev: "vdb", Source: "/mnt/pool/disks/file.qcow2"},
+		},
+	}
+}
+
+func newSnapshotStore(doms *fakeDomains, mw actionsMiddlewareFake, agentOK bool) (*Store, chan struct{}) {
+	nudge := make(chan struct{}, 8)
+	s := New(Config{
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Snapshot: snapWith(snapshotTestVM(model.AgentOK, "running")),
+		Conn:     &fakeConn{doms: doms},
+		Nudge:    nudge,
+		Timeout:  2 * time.Second,
+		Truenas:  mw,
+	})
+	return s, nudge
+}
+
+// actionsMiddlewareFake aliases the fake so the interface assignment is
+// obvious in test table setup.
+type actionsMiddlewareFake = *fakeMiddleware
+
+func submitSnapshot(t *testing.T, s *Store) Job {
+	t.Helper()
+	job, err := s.Submit("14_alpine_test", ActionSnapshot)
+	if err != nil {
+		t.Fatalf("submit snapshot: %v", err)
+	}
+	return *job
+}
+
+// TestSnapshotHappyPathFrozen: agent answers freeze, one create on the
+// zvol dataset (the file-backed disk is skipped), thaw, and the job
+// reports the whole sequence. Suspend/resume must never fire.
+func TestSnapshotHappyPathFrozen(t *testing.T) {
+	doms := &fakeDomains{agentReply: `{"return":1}`}
+	mw := &fakeMiddleware{}
+	s, _ := newSnapshotStore(doms, mw, true)
+
+	job := submitSnapshot(t, s)
+	got := waitForJob(t, s, job.ID, StateOK)
+
+	if !doms.has("agent:"+`{"execute":"guest-fsfreeze-freeze"}`,
+		"agent:"+`{"execute":"guest-fsfreeze-thaw"}`) {
+		t.Errorf("verb sequence = %v, want freeze then thaw", doms.calls)
+	}
+	if len(mw.creates) != 1 || mw.creates[0][0] != "nvme/vms/alpine_test-bxuwle" {
+		t.Errorf("creates = %v, want exactly the zvol dataset", mw.creates)
+	}
+	if !strings.Contains(mw.creates[0][1], "pademelon-alpine_test-") {
+		t.Errorf("snapshot name = %q, want the pademelon-<vm>-<ts> shape", mw.creates[0][1])
+	}
+	if strings.Contains(got.Detail, "frozen") == false || !strings.Contains(got.Detail, "thawed") {
+		t.Errorf("detail = %q, want the freeze/thaw story", got.Detail)
+	}
+}
+
+// TestSnapshotFallsBackToSuspend: no agent, so the guest is suspended
+// before the creates and resumed after — the symmetric fallback.
+func TestSnapshotFallsBackToSuspend(t *testing.T) {
+	s := New(Config{
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Snapshot: snapWith(snapshotTestVM(model.AgentDisconnected, "running")),
+		Conn:     &fakeConn{doms: &fakeDomains{}},
+		Nudge:    make(chan struct{}, 8),
+		Timeout:  2 * time.Second,
+		Truenas:  &fakeMiddleware{},
+	})
+	job := submitSnapshot(t, s)
+	got := waitForJob(t, s, job.ID, StateOK)
+
+	if !strings.Contains(got.Detail, "paused during the shot, resumed") {
+		t.Errorf("detail = %q, want the suspend/resume story", got.Detail)
+	}
+}
+
+// TestSnapshotCreateFailureStillThaws: the middleware create fails after
+// the guest was frozen — the thaw must run anyway, and the job must fail
+// with the middleware's complaint. This is the guarantee.
+func TestSnapshotCreateFailureStillThaws(t *testing.T) {
+	doms := &fakeDomains{agentReply: `{"return":1}`}
+	mw := &fakeMiddleware{failFrom: 1, err: errors.New("dataset busy")}
+	s, _ := newSnapshotStore(doms, mw, true)
+
+	job := submitSnapshot(t, s)
+	got := waitForJob(t, s, job.ID, StateFailed)
+
+	// The thaw is in the verb list even though the create failed.
+	foundThaw := false
+	for _, c := range doms.calls {
+		if strings.Contains(c, "guest-fsfreeze-thaw") {
+			foundThaw = true
+		}
+	}
+	if !foundThaw {
+		t.Errorf("verbs = %v, want a thaw despite the failed create", doms.calls)
+	}
+	if !strings.Contains(got.Detail, "dataset busy") {
+		t.Errorf("detail = %q, want the middleware error", got.Detail)
+	}
+}
+
+// TestSnapshotPausedGuestSkipsQuiesce: a paused guest is already
+// quiesced — no freeze, no suspend, no resume, just creates.
+func TestSnapshotPausedGuestSkipsQuiesce(t *testing.T) {
+	s := New(Config{
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Snapshot: snapWith(snapshotTestVM(model.AgentOK, "paused")),
+		Conn:     &fakeConn{doms: &fakeDomains{}},
+		Nudge:    make(chan struct{}, 8),
+		Timeout:  2 * time.Second,
+		Truenas:  &fakeMiddleware{},
+	})
+	job := submitSnapshot(t, s)
+	got := waitForJob(t, s, job.ID, StateOK)
+
+	if !strings.Contains(got.Detail, "already quiesced") {
+		t.Errorf("detail = %q, want the already-quiesced story", got.Detail)
+	}
+}
+
+// TestSnapshotWithoutMiddlewareRefused: no middleware configured, no
+// snapshot job — refused at submit time, before any guest is touched.
+func TestSnapshotWithoutMiddlewareRefused(t *testing.T) {
+	s, _ := newTestStore(snapWith(runningVM(model.AgentOK)), &fakeConn{doms: &fakeDomains{}}, time.Second)
+	if _, err := s.Submit("14_alpine_test", ActionSnapshot); !errors.Is(err, ErrMiddlewareOff) {
+		t.Errorf("submit without middleware = %v, want ErrMiddlewareOff", err)
+	}
+}
+
+// TestSnapshotNameFolding: characters that ZFS rejects in a snapshot name
+// fold to dashes; the pademelon- prefix and timestamp stay readable.
+func TestSnapshotNameFolding(t *testing.T) {
+	vm := &model.VM{Name: "weird vm.name/with@stuff", Domain: "7_weird"}
+	got := snapshotName(vm, time.Date(2026, 9, 7, 14, 32, 5, 0, time.UTC))
+	want := "pademelon-weird-vm.name-with-stuff-2026-09-07_14-32-05"
+	if got != want {
+		t.Errorf("snapshotName = %q, want %q", got, want)
+	}
+}
+
+// restoreTestVM carries a disk with its zvol and a cached snapshot list —
+// the id guard validates against this.
+func restoreTestVM(state string) model.VM {
+	return model.VM{
+		Domain: "14_alpine_test", Name: "alpine_test", State: state,
+		Running: state == "running", Agent: model.AgentOK,
+		Disks: []model.Disk{{Dev: "vda", Source: "/dev/zvol/nvme/vms/alpine_test-bxuwle"}},
+		Snapshots: []model.ZfsSnapshot{
+			{ID: "nvme/vms/alpine_test-bxuwle@pademelon-alpine_test-2026-09-07_15-00", Created: 100},
+		},
+	}
+}
+
+func newRestoreStore(doms *fakeDomains, mw *fakeMiddleware, state string) *Store {
+	return New(Config{
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Snapshot: snapWith(restoreTestVM(state)),
+		Conn:     &fakeConn{doms: doms},
+		Nudge:    make(chan struct{}, 8),
+		Timeout:  2 * time.Second,
+		Truenas:  mw,
+	})
+}
+
+const testSnapID = "nvme/vms/alpine_test-bxuwle@pademelon-alpine_test-2026-09-07_15-00"
+
+// TestRestoreStagedRunningFullCycle: shut down, wait for off, roll back,
+// start again — with the ack carrying the newer-snapshots destruction.
+func TestRestoreStagedRunningFullCycle(t *testing.T) {
+	doms := &fakeDomains{getInfo: []uint8{runningState, shutoffState}}
+	mw := &fakeMiddleware{}
+	s := newRestoreStore(doms, mw, "running")
+
+	job, err := s.SubmitRestore("14_alpine_test", RestoreOpts{
+		SnapshotID: testSnapID, Mode: ModeStaged, StartAfter: true, Ack: true,
+	})
+	if err != nil {
+		t.Fatalf("submit restore: %v", err)
+	}
+	got := waitForJob(t, s, job.ID, StateOK)
+
+	if !strings.Contains(got.Detail, "rolled back, started again") {
+		t.Errorf("detail = %q", got.Detail)
+	}
+	if !strings.Contains(got.Detail, "newer snapshots destroyed") {
+		t.Errorf("detail should carry the ack's meaning: %q", got.Detail)
+	}
+	if len(mw.rollbacks) != 1 || mw.rollbacks[0] != testSnapID+"|recursive=true" {
+		t.Errorf("rollbacks = %v", mw.rollbacks)
+	}
+	shutdownSeen, createSeen := false, false
+	for _, c := range doms.calls {
+		switch {
+		case strings.Contains(c, "guest-shutdown") || c == "shutdownFlags":
+			shutdownSeen = true
+		case c == "create":
+			createSeen = true
+		}
+	}
+	if !shutdownSeen || !createSeen {
+		t.Errorf("verb sequence = %v, want a shutdown then a create", doms.calls)
+	}
+}
+
+// TestRestoreStagedStoppedNoShutdown: an already-stopped guest skips the
+// shutdown phase entirely; without startAfter it stays stopped.
+func TestRestoreStagedStoppedNoShutdown(t *testing.T) {
+	doms := &fakeDomains{getInfo: []uint8{shutoffState}}
+	mw := &fakeMiddleware{}
+	s := newRestoreStore(doms, mw, "stopped")
+
+	job, err := s.SubmitRestore("14_alpine_test", RestoreOpts{
+		SnapshotID: testSnapID, Mode: ModeStaged, StartAfter: false, Ack: false,
+	})
+	if err != nil {
+		t.Fatalf("submit restore: %v", err)
+	}
+	got := waitForJob(t, s, job.ID, StateOK)
+
+	if strings.Contains(got.Detail, "started") {
+		t.Errorf("detail = %q, want the guest-left-stopped story", got.Detail)
+	}
+	if mw.rollbacks[0] != testSnapID+"|recursive=false" {
+		t.Errorf("rollbacks = %v — no ack means no recursive destruction", mw.rollbacks)
+	}
+	for _, c := range doms.calls {
+		if c == "shutdownFlags" {
+			t.Errorf("a stopped guest must not be shut down again: %v", doms.calls)
+		}
+	}
+}
+
+// TestRestoreRollbackFailureLeavesGuestStopped: when the rollback fails
+// after the shutdown, the job fails with the middleware's words and the
+// guest is NOT started — an honest stop beats a surprise boot.
+func TestRestoreRollbackFailureLeavesGuestStopped(t *testing.T) {
+	doms := &fakeDomains{getInfo: []uint8{runningState, shutoffState}}
+	mw := &fakeMiddleware{rollbackErr: errors.New("dataset busy")}
+	s := newRestoreStore(doms, mw, "running")
+
+	job, err := s.SubmitRestore("14_alpine_test", RestoreOpts{
+		SnapshotID: testSnapID, Mode: ModeStaged, StartAfter: true, Ack: true,
+	})
+	if err != nil {
+		t.Fatalf("submit restore: %v", err)
+	}
+	got := waitForJob(t, s, job.ID, StateFailed)
+
+	if !strings.Contains(got.Detail, "dataset busy") || !strings.Contains(got.Detail, "left as-is") {
+		t.Errorf("detail = %q", got.Detail)
+	}
+	for _, c := range doms.calls {
+		if c == "create" {
+			t.Errorf("a failed rollback must not start the guest: %v", doms.calls)
+		}
+	}
+}
+
+// TestRestoreDirectRunningNeedsAck: the backend's own refusal for a
+// direct restore of a running VM — the dialog's warning has a twin here.
+func TestRestoreDirectRunningNeedsAck(t *testing.T) {
+	s := newRestoreStore(&fakeDomains{}, &fakeMiddleware{}, "running")
+
+	if _, err := s.SubmitRestore("14_alpine_test", RestoreOpts{
+		SnapshotID: testSnapID, Mode: ModeDirect, Ack: false,
+	}); !errors.Is(err, ErrInvalidState) {
+		t.Errorf("direct without ack = %v, want ErrInvalidState", err)
+	}
+	if jobs := s.List(); len(jobs) != 0 {
+		t.Errorf("a refused restore must not register a job: %+v", jobs)
+	}
+	// With ack it goes through.
+	if _, err := s.SubmitRestore("14_alpine_test", RestoreOpts{
+		SnapshotID: testSnapID, Mode: ModeDirect, Ack: true,
+	}); err != nil {
+		t.Errorf("direct with ack refused: %v", err)
+	}
+}
+
+// TestDeleteJobRecordsTheVerb: the delete job rides the registry like
+// every other write, and already-gone is a fine answer.
+func TestDeleteJobRecordsTheVerb(t *testing.T) {
+	mw := &fakeMiddleware{}
+	s := newRestoreStore(&fakeDomains{}, mw, "running")
+
+	job, err := s.SubmitDelete("14_alpine_test", testSnapID)
+	if err != nil {
+		t.Fatalf("submit delete: %v", err)
+	}
+	got := waitForJob(t, s, job.ID, StateOK)
+	if !strings.Contains(got.Detail, "deleted") || len(mw.deletes) != 1 || mw.deletes[0] != testSnapID {
+		t.Errorf("detail = %q, deletes = %v", got.Detail, mw.deletes)
+	}
+
+	// Already gone: success with a different story, not a failure.
+	gone := &fakeMiddleware{deleteGone: true}
+	s2 := newRestoreStore(&fakeDomains{}, gone, "running")
+	job2, err := s2.SubmitDelete("14_alpine_test", testSnapID)
+	if err != nil {
+		t.Fatalf("submit delete: %v", err)
+	}
+	got2 := waitForJob(t, s2, job2.ID, StateOK)
+	if !strings.Contains(got2.Detail, "already gone") {
+		t.Errorf("detail = %q, want the already-gone story", got2.Detail)
+	}
+}
+
+// TestSnapshotIdGuard: a snapshot id that is not in the VM's cached list
+// is unreachable — restore and delete both refuse it.
+func TestSnapshotIdGuard(t *testing.T) {
+	s := newRestoreStore(&fakeDomains{}, &fakeMiddleware{}, "running")
+
+	if _, err := s.SubmitRestore("14_alpine_test", RestoreOpts{SnapshotID: "nvme/vms/x@ghost", Mode: ModeStaged}); !errors.Is(err, ErrUnknownSnapshot) {
+		t.Errorf("restore unknown snapshot = %v", err)
+	}
+	if _, err := s.SubmitDelete("14_alpine_test", "nvme/vms/x@ghost"); !errors.Is(err, ErrUnknownSnapshot) {
+		t.Errorf("delete unknown snapshot = %v", err)
+	}
+	// An unknown domain reads as unknown snapshot too — same 404 either way.
+	if _, err := s.SubmitDelete("99_ghost", testSnapID); err == nil {
+		t.Error("delete on unknown domain should refuse")
 	}
 }

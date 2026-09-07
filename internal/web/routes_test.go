@@ -44,7 +44,7 @@ func TestXMLRouteServesSnapshotCopy(t *testing.T) {
 	}
 
 	// A domain in the snapshot whose XML never landed (poll died mid-way)
-	// is a 404, not an empty 200 — a blank file helps nobody.
+	// is a 404, not an empty 200 — a blank file is useless.
 	if code, _, _ := doGetBody(s, "/api/vm/9_no_xml/xml", nil); code != http.StatusNotFound {
 		t.Errorf("xml for snapshot domain with no stored XML = %d, want 404", code)
 	}
@@ -56,9 +56,9 @@ func TestXMLRouteServesSnapshotCopy(t *testing.T) {
 }
 
 // TestVMsPayloadOmitsXML keeps /api/vms lean: the XML viewer has its own
-// route, so shipping every VM's full domain XML on every 1.5s poll would be
-// dead weight. The snapshot must still carry it server-side — the XML route
-// reads the same cache.
+// route, so shipping every VM's full domain XML on every 1.5s poll would
+// waste bytes. The snapshot must still carry it server-side — the XML
+// route reads the same cache.
 func TestVMsPayloadOmitsXML(t *testing.T) {
 	cache := model.NewCache()
 	cache.Set(model.Snapshot{
@@ -88,8 +88,8 @@ func TestVMsPayloadOmitsXML(t *testing.T) {
 }
 
 // TestRefreshRoutePokesNudge checks the refresh route pokes the channel
-// exactly once when there's room, drops pokes when the buffer is full,
-// and doesn't panic when no channel was wired (tests pass nil).
+// exactly once when there is room, drops pokes when the buffer is full,
+// and does not panic when no channel was wired (tests pass nil).
 func TestRefreshRoutePokesNudge(t *testing.T) {
 	nudge := make(chan struct{}, 1)
 	s := New(Config{Cache: model.NewCache(), Log: discardLogger(), Theme: DefaultTheme, Nudge: nudge})
@@ -107,7 +107,8 @@ func TestRefreshRoutePokesNudge(t *testing.T) {
 	}
 
 	// Buffer full: the second poke is dropped, not queued, and still 200.
-	// The channel still holds the first poke — that's the debounce working.
+	// The channel still holds the first poke — that is the debounce
+	// working.
 	rec = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

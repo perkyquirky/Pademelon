@@ -8,16 +8,18 @@
 // agent-mode shutdown blocked ~58s against a real Windows guest). A request
 // that submits a job returns in milliseconds; the job runs on its own
 // goroutine with a hard timeout, and the poller — nudged when the job
-// finishes — is the only thing that ever says what the guest is actually
-// doing now.
+// finishes — is the only source of truth about what the guest does now.
 package actions
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +29,7 @@ import (
 	"pademelon/internal/clocks"
 	"pademelon/internal/libvirtsrc"
 	"pademelon/internal/model"
+	"pademelon/internal/truenas"
 )
 
 // Action is one of the verbs the UI can ask for. The string form is what
@@ -40,6 +43,21 @@ const (
 	ActionForceOff Action = "force-off"
 	ActionPause    Action = "pause"
 	ActionResume   Action = "resume"
+	ActionSnapshot Action = "snapshot"
+
+	// Restore and delete target one snapshot each, so they never go
+	// through the per-VM verb route: they are not in allActions, the
+	// generic route cannot reach them, and their dedicated routes carry
+	// the snapshot id. The registry still records them as jobs, so the
+	// audit view tells the whole story.
+	ActionRestore Action = "restore"
+	ActionDelete  Action = "delete"
+)
+
+// The two restore paths (§8.6).
+const (
+	ModeStaged = "staged"
+	ModeDirect = "direct"
 )
 
 // allActions is the reviewed verb list, in the order the UI shows them.
@@ -53,6 +71,7 @@ var allActions = []Action{
 	ActionForceOff,
 	ActionPause,
 	ActionResume,
+	ActionSnapshot,
 }
 
 // Actions returns the full verb set. Treat the result as read-only.
@@ -90,6 +109,15 @@ type Job struct {
 	State     string    `json:"state"`
 	Requested time.Time `json:"requested"`
 	Detail    string    `json:"detail,omitempty"`
+
+	// Snapshot, Mode, StartAfter and Ack ride restore jobs; Snapshot also
+	// rides delete jobs. They are set by the dedicated submit methods and
+	// are what the UI's job peek shows. Ack is the operator's signature —
+	// the dialog computed what it covers and showed it before clicking.
+	Snapshot   string `json:"snapshot,omitempty"`
+	Mode       string `json:"mode,omitempty"` // restore: "staged" or "direct"
+	StartAfter bool   `json:"startAfter,omitempty"`
+	Ack        bool   `json:"ack,omitempty"`
 }
 
 // Sentinel errors. The web layer maps them onto status codes; everything
@@ -104,7 +132,48 @@ var (
 	// within the bound — the job's state reads timeout rather than failed,
 	// because nothing broke; the guest simply took too long.
 	ErrGuestNotStopped = errors.New("guest did not stop in time")
+
+	// ErrMiddlewareOff marks a snapshot request when the TrueNAS
+	// middleware integration is not configured. The dashboard shows
+	// snapshot buttons only when the capability says so, so this guards
+	// against races between the page and a config change.
+	ErrMiddlewareOff = errors.New("middleware integration is off")
+
+	// ErrUnknownSnapshot marks a restore or delete whose snapshot id
+	// is not in the poller's last list for that VM — the same
+	// blast-radius rule as the action routes: only what the dashboard
+	// shows is reachable.
+	ErrUnknownSnapshot = errors.New("unknown snapshot for this VM")
+
+	// ErrBadRestore marks a restore request whose options do not parse —
+	// an unknown mode, mostly. The web layer maps it to a 400.
+	ErrBadRestore = errors.New("bad restore request")
 )
+
+// RestoreOpts is what a restore request carries. Mode is "staged" (shut
+// down, wait for stopped, roll back, optionally start again) or "direct"
+// (roll back in place — the power tool). Ack is the operator's
+// acknowledgement, computed by the dialog from what it showed: a direct
+// restore of a running VM, and/or newer snapshots that the rollback will
+// destroy. Without ack the backend refuses both cases; nothing is
+// destroyed by default.
+type RestoreOpts struct {
+	SnapshotID string
+	Mode       string
+	StartAfter bool
+	Ack        bool
+}
+
+// MiddlewareClient is the slice of the TrueNAS middleware the action
+// layer is allowed to use — the middleware write verbs live behind this
+// interface and are called from here and nowhere else, the same zone rule
+// the libvirt verbs follow. nil means the integration is off and
+// snapshot/restore/delete jobs are refused before anything is touched.
+type MiddlewareClient interface {
+	CreateSnapshot(ctx context.Context, dataset, name string) (string, error)
+	RollbackSnapshot(ctx context.Context, dataset, name string, recursive bool) error
+	DeleteSnapshot(ctx context.Context, dataset, name string) (bool, error)
+}
 
 // Config is what the store needs from main.
 type Config struct {
@@ -116,8 +185,14 @@ type Config struct {
 	Timeout       time.Duration         // per-job wall clock bound; defaults to clocks.ActionTimeout
 	RebootTimeout time.Duration         // shutdown-then-start wait bound; defaults to clocks.RebootTimeout
 	WaitPoll      time.Duration         // reboot's guest-state poll interval; defaults to 2s (injectable for tests)
-	Now           func() time.Time      // injectable clock for tests
-	NewID         func() string         // injectable id source for tests
+
+	// SnapshotTimeout bounds one snapshot job (freeze + creates + thaw);
+	// defaults to clocks.SnapshotActionTimeout.
+	SnapshotTimeout time.Duration
+
+	Truenas MiddlewareClient // TrueNAS middleware writes; nil keeps snapshot jobs refused
+	Now     func() time.Time // injectable clock for tests
+	NewID   func() string    // injectable id source for tests
 }
 
 // Store is the job registry: an in-memory map with a mutex, single-flight
@@ -127,6 +202,11 @@ type Store struct {
 	cfg  Config
 	mu   sync.Mutex
 	jobs map[string]*Job
+
+	// frozen remembers which guests Pademelon froze during a snapshot
+	// job and when — the sweep force-thaws any entry that outlives
+	// FreezeHoldBound, so a stuck thaw can never leave a hung guest.
+	frozen map[string]time.Time
 }
 
 // New returns a Store ready to take submissions.
@@ -149,10 +229,18 @@ func New(cfg Config) *Store {
 	if cfg.RebootTimeout <= 0 {
 		cfg.RebootTimeout = clocks.RebootTimeout
 	}
+	if cfg.SnapshotTimeout <= 0 {
+		cfg.SnapshotTimeout = clocks.SnapshotActionTimeout
+	}
 	if cfg.WaitPoll <= 0 {
 		cfg.WaitPoll = 2 * time.Second
 	}
-	return &Store{cfg: cfg, jobs: map[string]*Job{}}
+	// A nil *truenas.Client inside the interface is the typed-nil trap
+	// (the web layer hit it in production once); treat it as off.
+	if v := reflect.ValueOf(cfg.Truenas); v.Kind() == reflect.Ptr && v.IsNil() {
+		cfg.Truenas = nil
+	}
+	return &Store{cfg: cfg, jobs: map[string]*Job{}, frozen: map[string]time.Time{}}
 }
 
 // newID is eight random bytes, hex — unique enough for a session audit and
@@ -160,8 +248,8 @@ func New(cfg Config) *Store {
 func newID() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
-		// crypto/rand failing means the box is in a bad way; a
-		// timestamp-based id still beats refusing to act.
+		// crypto/rand failing means the host is in a bad state; a
+		// timestamp-based id is better than refusing to act.
 		return fmt.Sprintf("t%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
@@ -182,12 +270,38 @@ func allowedStates(a Action) map[string]bool {
 	case ActionShutdown, ActionReboot:
 		return map[string]bool{"running": true}
 	case ActionForceOff:
-		// Destroy works on a paused guest too — sometimes that's exactly
-		// how you un-wedge one.
+		// Destroy works on a paused guest too — sometimes that is the
+		// only way to stop a stuck guest.
 		return map[string]bool{"running": true, "paused": true}
+	case ActionSnapshot:
+		// Running guests get frozen (or suspended); a paused or stopped
+		// guest is already quiesced by definition.
+		return map[string]bool{"running": true, "paused": true, "stopped": true}
 	default:
 		return nil
 	}
+}
+
+// register runs the single-flight check and queues a job. A second
+// submit of the same (domain, action) while one is pending is a "no, you
+// already asked", not a queued duplicate.
+func (s *Store) register(domain string, action Action, build func() *Job) (*Job, error) {
+	s.mu.Lock()
+	s.sweepLocked(s.cfg.Now())
+	for _, j := range s.jobs {
+		if j.Domain == domain && j.Action == action &&
+			(j.State == StatePending || j.State == StateRunning) {
+			inflight := *j
+			s.mu.Unlock()
+			return &inflight, ErrInFlight
+		}
+	}
+	job := build()
+	s.jobs[job.ID] = job
+	s.mu.Unlock()
+
+	go s.run(job)
+	return clone(job), nil
 }
 
 // Submit validates the request against the last snapshot, registers a job
@@ -197,6 +311,11 @@ func allowedStates(a Action) map[string]bool {
 func (s *Store) Submit(domain string, action Action) (*Job, error) {
 	if _, err := ParseAction(string(action)); err != nil {
 		return nil, ErrUnknownAction
+	}
+	// Middleware-backed verbs are refused at submit time: a config-off
+	// integration takes precedence over any state mismatch.
+	if action == ActionSnapshot && s.cfg.Truenas == nil {
+		return nil, ErrMiddlewareOff
 	}
 
 	snap := s.cfg.Snapshot()
@@ -215,33 +334,95 @@ func (s *Store) Submit(domain string, action Action) (*Job, error) {
 			domain, vm.State, action, stateNames(allowedStates(action)))
 	}
 
-	s.mu.Lock()
-	s.sweepLocked(s.cfg.Now())
-	for _, j := range s.jobs {
-		// Single-flight: a second shutdown while one is pending is a
-		// "no, you already asked", not a queued duplicate.
-		if j.Domain == domain && j.Action == action &&
-			(j.State == StatePending || j.State == StateRunning) {
-			inflight := *j
-			s.mu.Unlock()
-			return &inflight, ErrInFlight
+	return s.register(domain, action, func() *Job {
+		return &Job{
+			ID:        s.cfg.NewID(),
+			Domain:    domain,
+			Action:    action,
+			State:     StatePending,
+			Requested: s.cfg.Now(),
 		}
-	}
-	job := &Job{
-		ID:        s.cfg.NewID(),
-		Domain:    domain,
-		Action:    action,
-		State:     StatePending,
-		Requested: s.cfg.Now(),
-	}
-	s.jobs[job.ID] = job
-	s.mu.Unlock()
-
-	go s.run(job)
-	return clone(job), nil
+	})
 }
 
-// List returns finished-and-running jobs, oldest first.
+// SubmitRestore queues a snapshot restore. Validation happens here, on
+// the last snapshot's list: the snapshot must belong to one of this VM's
+// disk datasets, a direct restore of a running VM needs the
+// acknowledgement, and the mode must be one of the two known paths. The
+// job itself re-checks nothing — the registry owns it from here.
+func (s *Store) SubmitRestore(domain string, opts RestoreOpts) (*Job, error) {
+	if s.cfg.Truenas == nil {
+		return nil, ErrMiddlewareOff
+	}
+	if opts.Mode != ModeStaged && opts.Mode != ModeDirect {
+		return nil, fmt.Errorf("%w: mode %q, want %q or %q", ErrBadRestore, opts.Mode, ModeStaged, ModeDirect)
+	}
+	if _, _, err := s.validateSnapshot(domain, opts.SnapshotID); err != nil {
+		return nil, err
+	}
+	if opts.Mode == ModeDirect {
+		if vm := s.lookupVM(s.cfg.Snapshot(), domain); vm != nil && vm.Running && !opts.Ack {
+			return nil, fmt.Errorf(
+				"%w: %s is running — a direct rollback under a running guest can corrupt the disk; use the staged restore, stop the VM first, or pass the acknowledgement",
+				ErrInvalidState, domain)
+		}
+	}
+	return s.register(domain, ActionRestore, func() *Job {
+		return &Job{
+			ID:         s.cfg.NewID(),
+			Domain:     domain,
+			Action:     ActionRestore,
+			Snapshot:   opts.SnapshotID,
+			Mode:       opts.Mode,
+			StartAfter: opts.StartAfter,
+			Ack:        opts.Ack,
+			State:      StatePending,
+			Requested:  s.cfg.Now(),
+		}
+	})
+}
+
+// SubmitDelete queues a snapshot deletion. The id guard is the same as
+// the restore's: only snapshots the poller last reported are reachable.
+func (s *Store) SubmitDelete(domain, snapshotID string) (*Job, error) {
+	if s.cfg.Truenas == nil {
+		return nil, ErrMiddlewareOff
+	}
+	if _, _, err := s.validateSnapshot(domain, snapshotID); err != nil {
+		return nil, err
+	}
+	return s.register(domain, ActionDelete, func() *Job {
+		return &Job{
+			ID:        s.cfg.NewID(),
+			Domain:    domain,
+			Action:    ActionDelete,
+			Snapshot:  snapshotID,
+			State:     StatePending,
+			Requested: s.cfg.Now(),
+		}
+	})
+}
+
+// validateSnapshot checks the id guard: the snapshot must be in the last
+// snapshot's list for this VM. Returns the dataset and name parts.
+func (s *Store) validateSnapshot(domain, id string) (dataset, name string, err error) {
+	vm := s.lookupVM(s.cfg.Snapshot(), domain)
+	if vm == nil {
+		return "", "", fmt.Errorf("%w: %s not in the last snapshot", ErrUnknownDomain, domain)
+	}
+	for _, sn := range vm.Snapshots {
+		if sn.ID == id {
+			ds, n, ok := strings.Cut(id, "@")
+			if !ok {
+				return "", "", fmt.Errorf("%w: malformed id %q", ErrUnknownSnapshot, id)
+			}
+			return ds, n, nil
+		}
+	}
+	return "", "", fmt.Errorf("%w: %s on %s", ErrUnknownSnapshot, id, domain)
+}
+
+// List returns running and finished jobs, oldest first.
 func (s *Store) List() []Job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -259,18 +440,19 @@ func (s *Store) List() []Job {
 }
 
 // ShutdownAll plans a graceful shutdown for every running VM with a
-// connected agent, staggered so the storage doesn't take a simultaneous
-// thundering herd. The plan returns immediately (the HTTP handler must not
-// block on a VM-sized loop); the staggered submissions happen in a
-// goroutine. Deliberately dumb — the person at the keyboard is the
-// orchestrator (IDEAS-EXPLORED.md §3.3).
+// connected agent, staggered so the storage does not see a simultaneous
+// load from every VM. The plan returns immediately (the HTTP handler must
+// not block on a VM-sized loop); the staggered submissions happen in a
+// goroutine. The plan is deliberately simple — the person at the keyboard
+// is the orchestrator (IDEAS-EXPLORED.md §3.3).
 func (s *Store) ShutdownAll() (planned []string, skipped []string) {
 	snap := s.cfg.Snapshot()
 	for _, vm := range snap.VMs {
 		name := vm.Domain
 		switch {
 		case !vm.Running:
-			// Stopped needs nothing; paused can't hear a graceful shutdown.
+			// Stopped needs nothing; a paused guest cannot hear a
+			// graceful shutdown.
 			if vm.State == "paused" {
 				skipped = append(skipped, name+" (paused — left alone)")
 			}
@@ -307,20 +489,31 @@ func (s *Store) run(job *Job) {
 	s.mu.Unlock()
 
 	done := make(chan error, 1)
+	detail := ""
 	go func() {
 		done <- s.cfg.Conn.WithConnection(func(doms libvirtsrc.Domains) error {
-			return s.execute(doms, job)
+			// A dynamic detail (the snapshot job's closing line) is
+			// written here and read after the channel send — the
+			// channel's happens-before makes that safe without a lock.
+			var err error
+			detail, err = s.execute(doms, job)
+			return err
 		})
 	}()
 
 	var err error
-	// A reboot includes the wait-for-shutdown phase. Its outer bound gets a
-	// minute of slack over the reboot's own deadline so the specific
-	// "guest did not power off" message wins the race against this
-	// catch-all timer, not the other way round.
+	// A reboot includes the wait-for-shutdown phase. Its outer bound gets
+	// a minute of slack over the reboot's own deadline, so the specific
+	// "guest did not power off" message fires before this catch-all
+	// timer. A snapshot job gets its own, longer bound: freeze,
+	// one create per dataset and the thaw are one sequence, and even a
+	// timed-out job keeps running it — the thaw still lands.
 	bound := s.cfg.Timeout
-	if job.Action == ActionReboot {
+	switch job.Action {
+	case ActionReboot:
 		bound = s.cfg.RebootTimeout + time.Minute
+	case ActionSnapshot:
+		bound = s.cfg.SnapshotTimeout
 	}
 	select {
 	case err = <-done:
@@ -342,7 +535,10 @@ func (s *Store) run(job *Job) {
 		job.Detail = err.Error()
 	} else {
 		job.State = StateOK
-		job.Detail = s.detailFor(job)
+		job.Detail = detail
+		if job.Detail == "" {
+			job.Detail = s.detailFor(job)
+		}
 	}
 	s.mu.Unlock()
 	s.finish(job)
@@ -362,44 +558,390 @@ func (s *Store) finish(job *Job) {
 }
 
 // execute dispatches the verb for a job. It runs inside WithConnection, so
-// doms is a live connection.
-func (s *Store) execute(doms libvirtsrc.Domains, job *Job) error {
+// doms is a live connection. The string is an optional closing line for the
+// job's detail; empty falls back to detailFor's static text.
+func (s *Store) execute(doms libvirtsrc.Domains, job *Job) (string, error) {
+	// Delete never touches libvirt — a stopped or vanished VM still has
+	// snapshots worth deleting, so it must not depend on finding a domain.
+	if job.Action == ActionDelete {
+		return s.executeDelete(job)
+	}
 	dom, err := findDomain(doms, job.Domain)
 	if err != nil {
-		return err
+		return "", err
 	}
 	switch job.Action {
 	case ActionStart:
-		return doms.DomainCreate(dom)
+		return "", doms.DomainCreate(dom)
 	case ActionPause:
-		return doms.DomainSuspend(dom)
+		return "", doms.DomainSuspend(dom)
 	case ActionResume:
-		return doms.DomainResume(dom)
+		return "", doms.DomainResume(dom)
 	case ActionReboot:
-		return s.reboot(doms, dom, job)
+		return "", s.reboot(doms, dom, job)
 	case ActionForceOff:
-		// The power cord. The confirm dialog already made the human say it
-		// twice; the job just does it.
-		return doms.DomainDestroy(dom)
+		// Force off. The confirm dialog already made the user say it
+		// twice; the job just runs it.
+		return "", doms.DomainDestroy(dom)
 	case ActionShutdown:
-		return s.shutdown(doms, dom, job.Domain)
+		return "", s.shutdown(doms, dom, job.Domain)
+	case ActionSnapshot:
+		return s.snapshot(doms, dom, job)
+	case ActionRestore:
+		return s.restore(doms, dom, job)
 	default:
-		return fmt.Errorf("unknown action %q", job.Action)
+		return "", fmt.Errorf("unknown action %q", job.Action)
 	}
 }
 
-// reboot is the only reliable "restart" there is: there is no guest-agent
-// reboot command, and the ACPI power button means whatever the guest's OS
-// decides it means (Windows defaults to shut down; our Alpine test guest
-// ignored it entirely). So do what TrueNAS middleware itself does — shut
-// down gracefully, wait for the guest to actually stop, then start it
-// again. If the guest never stops, the job ends as a timeout with
-// instructions and the VM is left untouched rather than half-rebooted.
-func (s *Store) reboot(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) error {
-	if err := s.shutdown(doms, dom, job.Domain); err != nil {
-		return fmt.Errorf("shutdown phase: %w", err)
+// restore is the §8.6 sequence. Staged: shut the guest down, wait until
+// libvirt agrees it is off, roll back, optionally start again. Direct:
+// roll back in place — the submit-time ack is the operator's signature on
+// the risks, and the recursive flag is how newer snapshots get destroyed
+// on the way.
+func (s *Store) restore(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) (string, error) {
+	dataset, name, ok := strings.Cut(job.Snapshot, "@")
+	if !ok {
+		return "", fmt.Errorf("malformed snapshot id %q", job.Snapshot)
 	}
 
+	narration := ""
+	if job.Mode == ModeStaged {
+		state, _, _, _, _, err := doms.DomainGetInfo(dom)
+		if err != nil {
+			return "", fmt.Errorf("restore: read guest state: %w", err)
+		}
+		if libvirt.DomainState(state) != libvirt.DomainShutoff {
+			if err := s.shutdown(doms, dom, job.Domain); err != nil {
+				return "", fmt.Errorf("restore: shutdown phase: %w", err)
+			}
+			if err := s.waitStopped(doms, dom, "force off, or roll back directly once it is stopped"); err != nil {
+				return "", fmt.Errorf("restore: %w", err)
+			}
+			narration = "guest shut down, "
+		}
+	} else if job.Mode != ModeDirect {
+		return "", fmt.Errorf("%w: mode %q", ErrBadRestore, job.Mode)
+	}
+
+	if err := s.cfg.Truenas.RollbackSnapshot(context.Background(), dataset, name, job.Ack); err != nil {
+		return "", fmt.Errorf("restore: rollback failed, the guest is left as-is: %w", err)
+	}
+
+	var detail string
+	switch {
+	case job.Mode == ModeStaged && job.StartAfter:
+		if err := doms.DomainCreate(dom); err != nil {
+			return "", fmt.Errorf("restore: rolled back but start failed: %w", err)
+		}
+		detail = fmt.Sprintf("restored %q — %srolled back, started again", job.Snapshot, narration)
+	case job.Mode == ModeStaged:
+		detail = fmt.Sprintf("restored %q — %srolled back, guest left stopped", job.Snapshot, narration)
+	default:
+		detail = fmt.Sprintf("restored %q — rolled back in place", job.Snapshot)
+	}
+	if job.Ack {
+		detail += ", newer snapshots destroyed"
+	}
+	return detail, nil
+}
+
+// executeDelete removes one snapshot through the middleware. Already-gone
+// is a fine answer, not a failure.
+func (s *Store) executeDelete(job *Job) (string, error) {
+	dataset, name, ok := strings.Cut(job.Snapshot, "@")
+	if !ok {
+		return "", fmt.Errorf("malformed snapshot id %q", job.Snapshot)
+	}
+	deleted, err := s.cfg.Truenas.DeleteSnapshot(context.Background(), dataset, name)
+	if err != nil {
+		return "", err
+	}
+	if deleted {
+		return fmt.Sprintf("snapshot %q deleted", job.Snapshot), nil
+	}
+	return fmt.Sprintf("snapshot %q was already gone", job.Snapshot), nil
+}
+
+// snapshot is the consistent-snapshot sequence from IDEAS-EXPLORED.md §8.4:
+// quiesce the guest, snapshot every disk dataset on the middleware, then
+// un-quiesce — with the un-quiesce guaranteed on every path, because a
+// frozen guest is a hung guest.
+//
+// The quiesce ladder: fsfreeze when the agent answers (the cleanest), a
+// suspend/resume for agentless or old-agent guests, and nothing at all for
+// a guest that is already paused — paused is quiesced by definition.
+func (s *Store) snapshot(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) (string, error) {
+	if s.cfg.Truenas == nil {
+		return "", ErrMiddlewareOff
+	}
+	snap := s.cfg.Snapshot()
+	vm := s.lookupVM(snap, job.Domain)
+	if vm == nil {
+		return "", fmt.Errorf("%w: %s not in the last snapshot", ErrUnknownDomain, job.Domain)
+	}
+	datasets := truenasDatasets(vm)
+	if len(datasets) == 0 {
+		return "", fmt.Errorf("%s has no zvol-backed disks to snapshot", job.Domain)
+	}
+	name := snapshotName(vm, s.cfg.Now())
+
+	// --- quiesce phase ------------------------------------------------
+	froze, suspended := false, false
+	var freezeErr error
+	if vm.State == "running" {
+		if vm.Agent == model.AgentOK {
+			_, freezeErr = rawAgentCall(doms, dom, int32(s.cfg.AgentTimeout/time.Second), `{"execute":"guest-fsfreeze-freeze"}`)
+			if freezeErr == nil {
+				froze = true
+				s.frozenMark(job.Domain)
+			} else {
+				// An old agent without fsfreeze, or a transient hiccup —
+				// the suspend fallback quiesces just as well.
+				s.logDebug("fsfreeze failed, falling back to suspend", job.Domain, freezeErr)
+			}
+		}
+		if !froze {
+			if err := doms.DomainSuspend(dom); err != nil {
+				return "", fmt.Errorf("could not quiesce the guest (freeze: %v, suspend: %w)", freezeErr, err)
+			}
+			suspended = true
+		}
+	}
+
+	// --- snapshot phase -------------------------------------------------
+	// One create per dataset; a partial failure keeps going so the
+	// datasets that made it are reported rather than secretly dropped —
+	// no surprise deletions to "clean up".
+	var created, failed []string
+	for _, ds := range datasets {
+		_, err := s.cfg.Truenas.CreateSnapshot(context.Background(), ds, name)
+		if err != nil {
+			failed = append(failed, ds+": "+err.Error())
+		} else {
+			created = append(created, ds)
+		}
+	}
+
+	// --- un-quiesce phase — runs on every path below --------------------
+	var unquiesceErrs []string
+	if froze {
+		if err := s.thaw(doms, dom, job.Domain); err != nil {
+			unquiesceErrs = append(unquiesceErrs,
+				"WARNING: guest may still be frozen — retry the snapshot's thaw via the sweep, or thaw manually: "+err.Error())
+		}
+	}
+	if suspended {
+		if err := doms.DomainResume(dom); err != nil {
+			unquiesceErrs = append(unquiesceErrs, "WARNING: guest may still be paused: "+err.Error())
+		}
+	}
+
+	// --- report -----------------------------------------------------------
+	quiesceNote := ""
+	if len(unquiesceErrs) > 0 {
+		quiesceNote = " " + strings.Join(unquiesceErrs, " ")
+	}
+	if len(failed) > 0 {
+		return "", fmt.Errorf("snapshot %q failed on %d of %d dataset(s): %s.%s",
+			name, len(failed), len(datasets), strings.Join(failed, "; "), quiesceNote)
+	}
+	detail := fmt.Sprintf("snapshot %q created on %d dataset(s)", name, len(created))
+	switch {
+	case froze:
+		detail += " — guest filesystems frozen during the shot, thawed after"
+	case suspended:
+		detail += " — guest paused during the shot, resumed after"
+	default:
+		detail += " — guest was already quiesced (paused or stopped)"
+	}
+	return detail + quiesceNote, nil
+}
+
+// thaw unfreezes the guest's filesystems, retrying once — the guest's
+// agent may be busy with its own shutdown the first time. It clears the
+// sweep marker only on success, so a persistent failure keeps the
+// sweep's attention.
+func (s *Store) thaw(doms libvirtsrc.Domains, dom libvirt.Domain, domain string) error {
+	_, err := rawAgentCall(doms, dom, int32(s.cfg.AgentTimeout/time.Second), `{"execute":"guest-fsfreeze-thaw"}`)
+	if err == nil {
+		s.frozenClear(domain)
+		return nil
+	}
+	time.Sleep(2 * time.Second)
+	_, err = rawAgentCall(doms, dom, int32(s.cfg.AgentTimeout/time.Second), `{"execute":"guest-fsfreeze-thaw"}`)
+	if err == nil {
+		s.frozenClear(domain)
+		return nil
+	}
+	return err
+}
+
+// lookupVM finds one VM in the last snapshot.
+func (s *Store) lookupVM(snap model.Snapshot, domain string) *model.VM {
+	for i := range snap.VMs {
+		if snap.VMs[i].Domain == domain {
+			return &snap.VMs[i]
+		}
+	}
+	return nil
+}
+
+// truenasDatasets maps a VM's disks to middleware dataset names. Anything
+// that is not a zvol (ISOs, file-backed images) is skipped — there is no
+// zvol to snapshot.
+func truenasDatasets(vm *model.VM) []string {
+	var out []string
+	for _, d := range vm.Disks {
+		if ds, ok := truenas.DatasetFromDiskSource(d.Source); ok {
+			out = append(out, ds)
+		}
+	}
+	return out
+}
+
+// snapshotName builds the middleware snapshot name: pademelon-<vm>-<ts>.
+// The prefix is what makes these snapshots recognisable — and filterable —
+// in both the TrueNAS UI and Pademelon's own list. Characters that ZFS
+// rejects are folded to dashes.
+func snapshotName(vm *model.VM, at time.Time) string {
+	base := vm.Name
+	if base == "" {
+		base = vm.Domain
+	}
+	base = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == '_' || r == '-' || r == '.':
+			return r
+		default:
+			return '-'
+		}
+	}, base)
+	return "pademelon-" + base + "-" + at.Format("2006-01-02_15-04-05")
+}
+
+// frozenMark / frozenClear / frozenExpired keep the sweep's bookkeeping.
+func (s *Store) frozenMark(domain string) {
+	s.mu.Lock()
+	s.frozen[domain] = time.Now()
+	s.mu.Unlock()
+}
+
+func (s *Store) frozenClear(domain string) {
+	s.mu.Lock()
+	delete(s.frozen, domain)
+	s.mu.Unlock()
+}
+
+// SweepFrozenOnce is the startup sweep: every running guest with a
+// connected agent is asked for its fsfreeze status, and anything found
+// frozen gets thawed. It covers the crash case — a freeze succeeded, the
+// process died before the thaw, and the in-memory marker died with it; the
+// guest did not. Called from main in a goroutine; waits briefly for the
+// first poll so the agent states are known.
+func (s *Store) SweepFrozenOnce(ctx context.Context) {
+	for i := 0; i < 12; i++ {
+		if len(s.cfg.Snapshot().VMs) > 0 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+	}
+	s.sweepAgents(ctx, nil)
+}
+
+// SweepLoop force-thaws any guest whose frozen marker outlives
+// FreezeHoldBound — a second guard behind the job's own guaranteed thaw.
+// It runs until ctx is done; main starts it alongside the other loops.
+func (s *Store) SweepLoop(ctx context.Context) {
+	ticker := time.NewTicker(clocks.FreezeHoldBound)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.mu.Lock()
+			var expired []string
+			for domain, since := range s.frozen {
+				if time.Since(since) > clocks.FreezeHoldBound {
+					expired = append(expired, domain)
+				}
+			}
+			s.mu.Unlock()
+			for _, domain := range expired {
+				s.forceThaw(ctx, domain)
+			}
+		}
+	}
+}
+
+// forceThaw thaws one tracked guest no matter what — the sweep's direct
+// thaw. The marker clears on success; a persistent failure keeps it and
+// the next sweep tries again.
+func (s *Store) forceThaw(ctx context.Context, domain string) {
+	s.cfg.Log.Warn("guest frozen longer than the hold bound; force-thawing", "domain", domain)
+	err := s.cfg.Conn.WithConnection(func(doms libvirtsrc.Domains) error {
+		dom, err := findDomain(doms, domain)
+		if err != nil {
+			return err
+		}
+		return s.thaw(doms, dom, domain)
+	})
+	if err != nil {
+		s.cfg.Log.Warn("force-thaw failed; the sweep will retry", "domain", domain, "err", err)
+	}
+}
+
+// sweepAgents asks every running guest with a connected agent for its
+// fsfreeze status and thaws anything frozen. The optional filter limits
+// the pass to specific domains (nil = everyone).
+func (s *Store) sweepAgents(ctx context.Context, only map[string]bool) {
+	snap := s.cfg.Snapshot()
+	err := s.cfg.Conn.WithConnection(func(doms libvirtsrc.Domains) error {
+		for _, vm := range snap.VMs {
+			if only != nil && !only[vm.Domain] {
+				continue
+			}
+			if vm.State != "running" || vm.Agent != model.AgentOK {
+				continue
+			}
+			dom, err := findDomain(doms, vm.Domain)
+			if err != nil {
+				continue // not running right now; nothing to thaw
+			}
+			raw, err := rawAgentCall(doms, dom, int32(s.cfg.AgentTimeout/time.Second), `{"execute":"guest-fsfreeze-status"}`)
+			if err != nil {
+				continue // a quiet agent isn't a frozen guest
+			}
+			var r struct {
+				Return string `json:"return"`
+			}
+			if json.Unmarshal([]byte(raw), &r) != nil || r.Return != "frozen" {
+				continue
+			}
+			s.cfg.Log.Warn("found a guest frozen outside any snapshot job; thawing", "domain", vm.Domain)
+			s.frozenMark(vm.Domain)
+			if err := s.thaw(doms, dom, vm.Domain); err != nil {
+				s.cfg.Log.Warn("startup thaw failed; the sweep will retry", "domain", vm.Domain, "err", err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		s.cfg.Log.Warn("fsfreeze sweep could not reach libvirt", "err", err)
+	}
+}
+
+// waitStopped polls libvirt until the guest is actually off, bounded by
+// RebootTimeout. Shared by the reboot and the staged restore — the same
+// patience, the same honest timeout, the same "left untouched" outcome.
+func (s *Store) waitStopped(doms libvirtsrc.Domains, dom libvirt.Domain, hint string) error {
 	deadline := s.cfg.Now().Add(s.cfg.RebootTimeout)
 	for {
 		state, _, _, _, _, err := doms.DomainGetInfo(dom)
@@ -407,14 +949,30 @@ func (s *Store) reboot(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) er
 			return fmt.Errorf("waiting for shutdown: %w", err)
 		}
 		if libvirt.DomainState(state) == libvirt.DomainShutoff {
-			break
+			return nil
 		}
 		if s.cfg.Now().After(deadline) {
-			return fmt.Errorf("%w within %s — force off or start it manually", ErrGuestNotStopped, s.cfg.RebootTimeout)
+			return fmt.Errorf("%w within %s — %s", ErrGuestNotStopped, s.cfg.RebootTimeout, hint)
 		}
 		time.Sleep(s.cfg.WaitPoll)
 	}
+}
 
+// reboot is the only reliable "restart" there is: there is no guest-agent
+// reboot command, and the ACPI power button means whatever the guest's OS
+// decides it means (Windows defaults to shut down; the Alpine test guest
+// ignored it entirely). So the code does what TrueNAS middleware itself
+// does — shut down gracefully, wait for the guest to actually stop, then
+// start it again. If the guest never stops, the job ends as a timeout
+// with instructions and the VM is left untouched rather than
+// half-rebooted.
+func (s *Store) reboot(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) error {
+	if err := s.shutdown(doms, dom, job.Domain); err != nil {
+		return fmt.Errorf("shutdown phase: %w", err)
+	}
+	if err := s.waitStopped(doms, dom, "force off or start it manually"); err != nil {
+		return err
+	}
 	if err := doms.DomainCreate(dom); err != nil {
 		return fmt.Errorf("guest stopped but start failed: %w", err)
 	}
@@ -425,8 +983,8 @@ func (s *Store) reboot(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) er
 // agent path first (cleanest), ACPI second. guest-shutdown never replies
 // on success — the agent exits as its first act — so both an empty reply
 // and the "agent disappeared" error mean "requested, very likely working".
-// Only something else counts as an agent-path failure worth falling back
-// from.
+// Only something else counts as an agent-path failure that deserves the
+// ACPI fallback.
 func (s *Store) shutdown(doms libvirtsrc.Domains, dom libvirt.Domain, domain string) (err error) {
 	if s.agentConnected(domain) {
 		_, callErr := rawAgentCall(doms, dom, int32(s.cfg.AgentTimeout/time.Second), `{"execute":"guest-shutdown"}`)
@@ -470,7 +1028,7 @@ func rawAgentCall(doms libvirtsrc.Domains, d libvirt.Domain, timeoutSecs int32, 
 // "guest agent command timed out: Guest agent disappeared while executing
 // command" — near-instant on Linux, ~4s on Windows, and the guest shuts
 // down either way. Matched on the message because libvirt's error type
-// doesn't distinguish it structurally.
+// does not distinguish it structurally.
 func isAgentGoneErr(err error) bool {
 	if err == nil {
 		return false
@@ -530,7 +1088,7 @@ func stateNames(states map[string]bool) string {
 	return strings.Join(names, " or ")
 }
 
-// clone copies a job so callers can't mutate the registry's copy.
+// clone copies a job so callers cannot mutate the registry's copy.
 func clone(j *Job) *Job {
 	c := *j
 	return &c

@@ -15,7 +15,8 @@ services:
 
     environment:
       # Optional: token for the private routes (job history, actions).
-      # If you want read only stats comment out PADEMELON_TOKEN and PADAMELON_ALLOW_ACTIONS
+      # For read-only stats, comment out PADAMELON_TOKEN and
+      # PADAMELON_ALLOW_ACTIONS.
       # Generate one with: openssl rand -hex 32
       - PADAMELON_TOKEN=change-me-to-your-generated-token
       #

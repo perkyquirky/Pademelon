@@ -2,19 +2,21 @@
 // finds into model.Snapshot values.
 //
 // Everything in here is read-only. There are no calls that create, destroy,
-// define, undefine or otherwise change a domain, and there must never be —
-// the container holds a read-write libvirt handle purely because guest agent
-// commands are classed as writes, not because it needs to change anything.
+// define, undefine or otherwise change a domain, and there must never be.
+// The container holds a read-write libvirt handle purely because guest
+// agent commands are classed as writes, not because it needs to change
+// anything.
 //
 // The one deliberate hand-off: WithConnection lends the live connection to
 // a callback, which is how the action layer (internal/actions) reaches
-// libvirt when -allow-actions is on. No write verbs exist in this package —
-// the interface below only declares names — and the CI allowlist keeps it
-// that way.
+// libvirt when -allow-actions is on. No write verbs exist in this package;
+// the interface below only declares names. The CI allowlist keeps it that
+// way.
 //
-// Event subscriptions are pure reads: libvirt tells us when a guest-agent
-// channel changes state, which is information it already watches on our
-// behalf. We use that to nudge the poll loop, never to write anything.
+// Event subscriptions are pure reads: libvirt reports when a guest-agent
+// channel changes state, which is information it already watches on
+// Pademelon's behalf. The package uses that to nudge the poll loop, never
+// to write anything.
 package libvirtsrc
 
 import (
@@ -36,9 +38,9 @@ import (
 	"pademelon/internal/model"
 )
 
-// Memory stat tags from libvirt-domain.h. We spell them out rather than
-// leaning on the generated constants so the meaning is visible at the point
-// of use — these numbers are stable libvirt ABI.
+// Memory stat tags from libvirt-domain.h. The package spells the numbers
+// out instead of using the generated constants, so the meaning is visible
+// at the point of use — these numbers are stable libvirt ABI.
 const (
 	memStatUnused     int32 = 4 // MemFree in the guest
 	memStatAvailable  int32 = 5 // MemTotal in the guest
@@ -60,7 +62,7 @@ type Config struct {
 
 	// AgentTimeout is how long to give a guest agent command. libvirt's API
 	// takes whole seconds; main rejects sub-second values at startup, so
-	// one wedged guest can't stall a poll.
+	// one stuck guest cannot stall a poll.
 	AgentTimeout time.Duration
 
 	// StatsPeriod is how often QEMU re-collects balloon stats from the
@@ -70,13 +72,13 @@ type Config struct {
 	// boot-snapshot behaviour (with stale readings rejected).
 	StatsPeriod time.Duration
 
-	// Concurrency caps how many VMs we interrogate at once. 0 (or less)
-	// means auto: one worker per VM, so a poll runs in one wave. A
+	// Concurrency caps how many VMs the poller interrogates at once. 0 (or
+	// less) means auto: one worker per VM, so a poll runs in one wave. A
 	// positive value caps the parallelism instead.
 	Concurrency int
 
 	// Notify is called whenever libvirt reports a guest-agent channel state
-	// change for any domain — libvirt pushing what it already watches
+	// change for any domain. libvirt pushes what it already watches,
 	// instead of Pademelon waiting for the next poll. It must not block:
 	// main wires it to the poll loop's one-slot nudge channel. The poll
 	// stays the only writer of the cache; the event just makes the next
@@ -86,8 +88,8 @@ type Config struct {
 	Log *slog.Logger
 }
 
-// Source is a live connection to libvirt, plus the small amount of state we
-// need to work out rates of change between polls.
+// Source is a live connection to libvirt, plus the small amount of state
+// the poller needs to compute rates of change between polls.
 type Source struct {
 	cfg Config
 	log *slog.Logger
@@ -95,33 +97,36 @@ type Source struct {
 	mu   sync.Mutex
 	conn *libvirt.Libvirt
 
-	// prevCPU holds the last CPU time sample per domain, so we can turn
-	// libvirt's cumulative nanosecond counter into a percentage.
+	// prevCPU holds the last CPU time sample per domain, so the poller can
+	// turn libvirt's cumulative nanosecond counter into a percentage.
 	prevCPU map[string]cpuSample
 
 	// prevBlock and prevNet hold the previous poll's cumulative byte
 	// counters per disk and NIC, keyed by domain and device — the same
-	// delta-between-polls trick the CPU column uses, applied to throughput.
+	// difference-between-polls method that the CPU column uses, applied to
+	// throughput.
 	prevBlock map[string]blockSample
 	prevNet   map[string]netSample
 
-	// lastAgent remembers each VM's agent state so we can log the transition
-	// once instead of moaning about the same missing agent every 30 seconds.
+	// lastAgent remembers each VM's agent state so the poller logs the
+	// transition once, instead of a warning every 30 seconds about the
+	// same missing agent.
 	lastAgent map[string]model.AgentState
 
-	// lastMemStale remembers which VMs we have already warned about stale
-	// balloon stats, so a wedged guest costs one log line, not one per poll.
+	// lastMemStale remembers which VMs the poller already warned about
+	// stale balloon stats, so a stuck guest costs one log line, not one
+	// per poll.
 	lastMemStale map[string]bool
 
-	// statsPeriodSet remembers for which VMs we have switched on QEMU's
+	// statsPeriodSet remembers for which VMs the poller switched on QEMU's
 	// balloon stats poll timer during this boot of each VM.
 	statsPeriodSet map[string]bool
 
 	// agentEvents holds one pending agent-lifecycle hint per libvirt domain
-	// ID: the footprint of a channel state change libvirt told us about,
+	// ID: a record of the channel state change that libvirt reported,
 	// waiting for the next poll to confirm it and clear it. One entry per
-	// domain — an agent bouncing during a guest boot overwrites, it never
-	// accumulates.
+	// domain — an agent that starts and stops during a guest boot
+	// overwrites, it never accumulates.
 	agentEvents map[int32]time.Time
 
 	// subscribe opens the guest-agent event stream. A seam for tests; New
@@ -132,9 +137,9 @@ type Source struct {
 	// running; the drain goroutine exits on its own once it fires.
 	eventCancel context.CancelFunc
 
-	// eventsUnavailable remembers whether a failed subscription has already
-	// been complained about, so a libvirt that won't do events doesn't
-	// write a fresh warning on every reconnect.
+	// eventsUnavailable remembers whether the poller already warned about
+	// a failed subscription, so a libvirt that does not support events
+	// does not write a fresh warning on every reconnect.
 	eventsUnavailable bool
 }
 
@@ -165,10 +170,11 @@ func New(cfg Config) *Source {
 		cfg.Log = slog.Default()
 	}
 	// A balloon reading is roughly one to two collection periods old by the
-	// time we look at it — QEMU collects on its own timer, we read whenever
-	// the poll fires. Once 2× the period reaches the staleness threshold,
-	// most readings get rejected as fossils and the memory column shows
-	// "allocated". That's a config mistake worth complaining about once.
+	// time the poller reads it — QEMU collects on its own timer, and the
+	// poll reads whenever it fires. Once 2× the period reaches the
+	// staleness threshold, the poller rejects most readings as too old and
+	// the memory column shows "allocated". That is a config mistake worth
+	// one warning.
 	if cfg.StatsPeriod > 0 && 2*cfg.StatsPeriod >= clocks.BalloonStaleAfter {
 		cfg.Log.Warn("stats period close to staleness threshold, most memory readings will be rejected",
 			"stats_period", cfg.StatsPeriod,
@@ -199,9 +205,9 @@ type ConnSource interface {
 }
 
 // Domains is the slice of the libvirt connection the action layer is
-// allowed to use. *Libvirt satisfies it. Declared here, next to the
-// connection it borrows, so the borrow never turns into a general-purpose
-// escape hatch — the verbs are enumerated, reviewed and grepped.
+// allowed to use. *Libvirt satisfies it. It is declared here, next to the
+// connection it borrows, so the borrow stays limited to these verbs — the
+// verbs are enumerated, reviewed and grepped.
 type Domains interface {
 	DomainCreate(d libvirt.Domain) error
 	DomainShutdownFlags(d libvirt.Domain, flags libvirt.DomainShutdownFlagValues) error
@@ -250,10 +256,10 @@ func subscribeAgentLifecycle(ctx context.Context, l *libvirt.Libvirt) (<-chan in
 	return l.SubscribeEvents(ctx, libvirt.DomainEventIDAgentLifecycle, nil)
 }
 
-// startAgentEvents subscribes and spawns the drain goroutine. Called with
-// the mutex held, straight after a successful (re)connect: a subscription
-// belongs to one connection and dies with it. Failures degrade, they don't
-// kill the poll — without events, the poll interval is simply the only
+// startAgentEvents subscribes and spawns the drain goroutine. The caller
+// holds the mutex, straight after a successful (re)connect: a subscription
+// belongs to one connection and dies with it. Failures degrade, they do
+// not kill the poll — without events, the poll interval is simply the only
 // source of agent state, exactly as before this feature existed.
 func (s *Source) startAgentEvents(l *libvirt.Libvirt) {
 	if s.cfg.Notify == nil {
@@ -281,9 +287,9 @@ func (s *Source) stopAgentEvents() {
 }
 
 // drainAgentEvents turns delivered events into hints and nudges until the
-// stream ends — either we cancelled it because the connection died, or
-// libvirt closed it. Losing an event costs at most one poll interval of
-// freshness, never correctness.
+// stream ends — either the source cancelled it because the connection
+// died, or libvirt closed it. Losing an event costs at most one poll
+// interval of freshness, never correctness.
 func (s *Source) drainAgentEvents(ctx context.Context, ch <-chan interface{}) {
 	for {
 		select {
@@ -302,7 +308,7 @@ func (s *Source) drainAgentEvents(ctx context.Context, ch <-chan interface{}) {
 
 // handleAgentEvent records a channel state change as a hint for the next
 // poll and pokes the notify callback so that poll happens sooner. Repeated
-// events for the same domain overwrite the hint rather than pile up.
+// events for the same domain overwrite the hint rather than accumulate.
 func (s *Source) handleAgentEvent(msg *libvirt.DomainEventCallbackAgentLifecycleMsg) {
 	s.mu.Lock()
 	s.agentEvents[msg.Dom.ID] = time.Now()
@@ -332,9 +338,9 @@ func (s *Source) consumeAgentEvent(id int32) (time.Time, bool) {
 	return at, ok
 }
 
-// warnEventsUnavailable complains about a failed event subscription —
-// loudly once per process, quietly afterwards, so a libvirt that won't do
-// events doesn't write a warning on every reconnect.
+// warnEventsUnavailable logs a failed event subscription — once at warn
+// level per process, at debug level afterwards, so a libvirt that does not
+// support events does not write a warning on every reconnect.
 func (s *Source) warnEventsUnavailable(err error) {
 	s.mu.Lock()
 	first := !s.eventsUnavailable
@@ -393,8 +399,8 @@ func (s *Source) Poll() (model.Snapshot, error) {
 
 	domains, _, err := conn.ConnectListAllDomains(1, 0)
 	if err != nil {
-		// Almost always means the connection died under us. Drop it so the
-		// next poll redials rather than retrying on a corpse.
+		// Almost always means the connection died. Drop it so the next
+		// poll redials rather than retrying on a dead connection.
 		s.Close()
 		return model.Snapshot{}, fmt.Errorf("list domains: %w", err)
 	}
@@ -447,9 +453,9 @@ func (s *Source) Poll() (model.Snapshot, error) {
 }
 
 // inspect gathers everything about one domain. It never returns an error —
-// a VM we can't fully read still gets a row with whatever we did manage,
-// because "this VM exists and is running but the agent is quiet" is useful
-// information, not a failure.
+// a VM that the poller cannot fully read still gets a row with whatever
+// it did manage, because "this VM exists and is running but the agent is
+// quiet" is useful information, not a failure.
 func (s *Source) inspect(conn *libvirt.Libvirt, d libvirt.Domain) model.VM {
 	// Consume any pending agent-lifecycle hint for this domain up front, so
 	// a hint can never outlive its poll — domain IDs get reused by libvirt.
@@ -478,9 +484,9 @@ func (s *Source) inspect(conn *libvirt.Libvirt, d libvirt.Domain) model.VM {
 	if err != nil {
 		s.log.Warn("domain info failed", "domain", d.Name, "err", err)
 		vm.State = "unknown"
-		// We never got far enough to ask the agent anything — report that
-		// as an error rather than the zero value, which the API would
-		// render as a mysterious empty "agent" field.
+		// The poller never got far enough to ask the agent anything.
+		// Report that as an error rather than the zero value, which the
+		// API would render as an unexplained empty "agent" field.
 		vm.Agent = model.AgentError
 		vm.AgentError = err.Error()
 		return vm
@@ -493,8 +499,8 @@ func (s *Source) inspect(conn *libvirt.Libvirt, d libvirt.Domain) model.VM {
 
 	// The XML is worth fetching for every VM, running or not: disks, NICs
 	// and the agent channel state all live in it. A stopped VM reports the
-	// shapes (which disk, which bus) but libvirt can't answer capacity or
-	// rate questions about a machine that isn't running.
+	// shapes (which disk, which bus) but libvirt cannot answer capacity or
+	// rate questions about a machine that is not running.
 	xmlDesc, err := conn.DomainGetXMLDesc(d, 0)
 	if err != nil {
 		s.log.Warn("domain xml failed", "domain", d.Name, "err", err)
@@ -514,9 +520,9 @@ func (s *Source) inspect(conn *libvirt.Libvirt, d libvirt.Domain) model.VM {
 	vm.Nics = nicShapes(&dx)
 
 	if !vm.Running {
-		// A stopped VM has nothing else to tell us, but it still belongs in
-		// the list — vanishing when you shut one down is exactly the thing
-		// that makes an in-guest monitoring tool useless for this job.
+		// A stopped VM has nothing else to report, but it still belongs in
+		// the list — a VM that vanishes on shutdown makes an in-guest
+		// monitoring tool useless for this job.
 		s.forgetCPU(d.Name)
 		s.forgetDomainSamples(d.Name)
 		s.forgetStatsPeriod(d.Name)
@@ -547,9 +553,9 @@ func (s *Source) inspect(conn *libvirt.Libvirt, d libvirt.Domain) model.VM {
 	}
 
 	// Read the channel state out of the XML before calling the agent. A VM
-	// without qemu-guest-agent installed shows state='disconnected', and
-	// skipping it here is the difference between a poll that costs nothing
-	// and one that burns the full agent timeout on every agentless VM.
+	// without qemu-guest-agent installed shows state='disconnected'.
+	// Skipping it here means a poll that costs nothing; calling the agent
+	// anyway costs the full agent timeout on every agentless VM.
 	switch agentChannelState(&dx) {
 	case "":
 		vm.Agent = model.AgentAbsent
@@ -568,10 +574,9 @@ func (s *Source) inspect(conn *libvirt.Libvirt, d libvirt.Domain) model.VM {
 	return vm
 }
 
-// fillDiskLive asks libvirt for everything a running disk can tell us: its
-// capacity, and read/write throughput across the last two polls. It mutes
-// itself on any failure — a disk we can't read rates for simply keeps its
-// shape and no numbers.
+// fillDiskLive asks libvirt for everything a running disk can report: its
+// capacity, and read/write throughput across the last two polls. On any
+// failure the disk keeps its shape and shows no numbers.
 func (s *Source) fillDiskLive(conn *libvirt.Libvirt, d libvirt.Domain, disk *model.Disk, now time.Time) {
 	_, capacity, _, err := conn.DomainGetBlockInfo(d, disk.Dev, 0)
 	if err != nil {
@@ -592,7 +597,7 @@ func (s *Source) fillDiskLive(conn *libvirt.Libvirt, d libvirt.Domain, disk *mod
 	s.mu.Unlock()
 
 	if rd < 0 || wr < 0 {
-		// libvirt hands back -1 for counters it can't fill; forget any
+		// libvirt hands back -1 for counters it cannot fill; forget any
 		// previous sample so the next good poll starts fresh rather than
 		// dividing against nonsense.
 		s.mu.Lock()
@@ -646,7 +651,8 @@ func (s *Source) fillNicLive(conn *libvirt.Libvirt, d libvirt.Domain, nic *model
 
 // bytesPerSecond differences two samples of a cumulative byte counter.
 // ok=false when the counter went backwards — the VM restarted and the old
-// sample belongs to a previous lifetime (the same rule cpuPercent uses).
+// sample belongs to the previous QEMU process (the same rule cpuPercent
+// uses).
 func bytesPerSecond(prev, nowv uint64, elapsed time.Duration) (uint64, bool) {
 	if elapsed <= 0 || nowv < prev {
 		return 0, false
@@ -655,8 +661,8 @@ func bytesPerSecond(prev, nowv uint64, elapsed time.Duration) (uint64, bool) {
 }
 
 // forgetDomainSamples drops one domain's rate history. Counters are
-// cumulative per QEMU instance, so a stopped or restarted VM's old samples
-// are from a different lifetime.
+// cumulative per QEMU instance, so a stopped or restarted VM's old
+// samples belong to the previous QEMU process.
 func (s *Source) forgetDomainSamples(domain string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -709,9 +715,9 @@ func (s *Source) fillFromAgent(conn *libvirt.Libvirt, d libvirt.Domain, vm *mode
 		s.log.Debug("fsinfo failed", "domain", d.Name, "err", err)
 	}
 
-	// The version line turns "why doesn't this VM show X?" into a one-
-	// glance answer; the clock drift flags paused or restored VMs whose
-	// guest clock NTP hasn't caught up with yet. Both are best-effort.
+	// The version line answers "why doesn't this VM show X?" in one
+	// glance. The clock drift flags paused or restored VMs, whose guest
+	// clock lags until NTP catches up. Both are best-effort.
 	if version, _, err := agent.Info(call); err == nil {
 		vm.AgentVersion = version
 	} else {
@@ -749,9 +755,10 @@ func (s *Source) agentCaller(conn *libvirt.Libvirt, d libvirt.Domain) agent.Call
 
 // memory reads guest memory from the virtio balloon.
 //
-// used is worked out as total minus MemAvailable where the guest reports it,
-// which is what `free` calls used. Falling back to total minus MemFree counts
-// the page cache as used and makes every healthy Linux box look full.
+// The function computes used as total minus MemAvailable where the guest
+// reports it, which is what `free` calls used. The fallback to total minus
+// MemFree counts the page cache as used and makes every healthy Linux box
+// look full.
 func (s *Source) memory(conn *libvirt.Libvirt, d libvirt.Domain) (used, total uint64, ok bool) {
 	stats, err := conn.DomainMemoryStats(d, 16, 0)
 	if err != nil {
@@ -765,13 +772,13 @@ func (s *Source) memory(conn *libvirt.Libvirt, d libvirt.Domain) (used, total ui
 }
 
 // balloonMemory turns raw balloon stats into used/total KiB. ok=false means
-// the guest told us nothing usable — the caller then shows the VM as
-// "allocated" rather than inventing a used value. stale is a special case of
-// !ok: the stats are a dated snapshot from a guest whose balloon driver has
+// the guest gave nothing usable — the caller then shows the VM as
+// "allocated" rather than inventing a used value. stale is a special case
+// of !ok: the stats are a dated snapshot from a guest whose balloon driver
 // stopped answering, not a live reading.
 //
 // QEMU stamps the stats with the host clock when the guest driver answers,
-// so there is no guest clock skew to worry about.
+// so guest clock skew is not a concern.
 func balloonMemory(stats []libvirt.DomainMemoryStat, now time.Time) (used, total uint64, ok, stale bool) {
 	var available, unused, usable uint64
 	var haveAvailable, haveUnused, haveUsable bool
@@ -808,8 +815,8 @@ func balloonMemory(stats []libvirt.DomainMemoryStat, now time.Time) (used, total
 }
 
 // cpuPercent turns libvirt's cumulative CPU nanoseconds into a percentage of
-// the VM's allocated cores. Returns ok=false on the first poll for a domain,
-// when there's nothing to compare against yet.
+// the VM's allocated cores. It returns ok=false on the first poll for a
+// domain, when there is nothing to compare against yet.
 func (s *Source) cpuPercent(domain string, cpuTime uint64, vcpus int) (float64, bool) {
 	now := time.Now()
 
@@ -846,19 +853,20 @@ func (s *Source) forgetCPU(domain string) {
 // enableStatsPeriod starts QEMU's internal balloon stats polling for a
 // running VM, once per boot of that VM.
 //
-// QEMU only re-collects balloon stats while its poll timer runs, and that
+// QEMU only re-collects balloon stats while its poll timer runs. That
 // timer exists only when the domain XML sets <memballoon><stats period> or
-// someone makes this call. TrueNAS never sets one, so without it every
-// query — ours, virsh's, anything's — returns the single snapshot the guest
-// pushed at boot, and the memory column shows numbers from boot time
-// forever.
+// a caller makes this call. TrueNAS never sets one, so without it every
+// query — from Pademelon, virsh, or anything else — returns the single
+// snapshot the guest pushed at boot, and the memory column shows numbers
+// from boot time forever.
 //
 // This is the one deliberate exception to "only read APIs". It sets no
-// memory, adds no devices and enters no guest: it flips a polling knob
-// inside QEMU so the guest's balloon driver starts answering stats requests.
-// It is the same class of privileged-but-harmless as the guest agent queries
-// this tool already makes, the CI grep whitelists this call name and nothing
-// else, and README2.md "About the permissions" documents it.
+// memory, adds no devices and enters no guest: it turns on a polling
+// timer inside QEMU so the guest's balloon driver starts answering stats
+// requests. It is privileged but harmless, in the same class as the
+// guest agent queries this tool already makes. The CI grep whitelists
+// this call name and nothing else, and README2.md "About the permissions"
+// documents it.
 func (s *Source) enableStatsPeriod(conn *libvirt.Libvirt, d libvirt.Domain) {
 	if s.cfg.StatsPeriod <= 0 {
 		return
@@ -873,7 +881,7 @@ func (s *Source) enableStatsPeriod(conn *libvirt.Libvirt, d libvirt.Domain) {
 	}
 
 	if err := conn.DomainSetMemoryStatsPeriod(d, secondsInt32(s.cfg.StatsPeriod), 0); err != nil {
-		// One transient failure shouldn't disable the feature for the
+		// One transient failure should not disable the feature for the
 		// process's lifetime; try again on the next poll.
 		s.mu.Lock()
 		delete(s.statsPeriodSet, d.Name)
@@ -893,7 +901,7 @@ func (s *Source) forgetStatsPeriod(domain string) {
 }
 
 // logAgentTransition logs only when a VM's agent state changes, so a box
-// without the agent installed doesn't write a line every single poll.
+// without the agent installed does not write a line every single poll.
 func (s *Source) logAgentTransition(domain string, now model.AgentState) {
 	s.mu.Lock()
 	prev, had := s.lastAgent[domain]
@@ -916,10 +924,10 @@ func (s *Source) logAgentTransition(domain string, now model.AgentState) {
 	}
 }
 
-// logMemoryStale warns once per transition when a VM's balloon stats have
-// gone stale. A guest whose virtio_balloon driver stopped answering would
-// otherwise either spam this every poll or stay completely silent while the
-// dashboard shows days-old numbers.
+// logMemoryStale warns once per transition when a VM's balloon stats go
+// stale. Without it, a guest whose virtio_balloon driver stopped answering
+// would either log a warning every poll or stay silent while the dashboard
+// shows days-old numbers.
 func (s *Source) logMemoryStale(domain string, stale bool) {
 	s.mu.Lock()
 	prev := s.lastMemStale[domain]
@@ -939,7 +947,7 @@ func (s *Source) logMemoryStale(domain string, stale bool) {
 	}
 }
 
-// domainXML is the slice of a domain's XML we actually care about.
+// domainXML is the slice of a domain's XML that this package actually uses.
 type domainXML struct {
 	XMLName xml.Name `xml:"domain"`
 	UUID    string   `xml:"uuid"`
@@ -980,9 +988,9 @@ type domainXML struct {
 	} `xml:"devices"`
 }
 
-// parseDomainXML pulls everything we care about out of a domain's XML.
+// parseDomainXML pulls everything this package needs out of a domain's XML.
 // A parse failure returns a zero value, which the caller treats as "this VM
-// exists but tells us nothing" rather than dropping the row.
+// exists but reports nothing" rather than dropping the row.
 func parseDomainXML(raw string) (dx domainXML) {
 	_ = xml.Unmarshal([]byte(raw), &dx)
 	return dx
@@ -999,10 +1007,10 @@ func agentChannelState(dx *domainXML) string {
 	return ""
 }
 
-// diskShapes turns the XML disk list into model.Disks. Everything that
-// isn't real storage gets dropped — cdroms and floppies report through the
-// same list and would drown the actual disks, the same way squashfs mounts
-// drown real filesystems in the storage column.
+// diskShapes turns the XML disk list into model.Disks. Everything that is
+// not real storage gets dropped — cdroms and floppies report through the
+// same list and would fill the disk table, the way squashfs mounts fill
+// and hide real filesystems in the storage column.
 func diskShapes(dx *domainXML) []model.Disk {
 	out := make([]model.Disk, 0, len(dx.Devices.Disks))
 	for _, xd := range dx.Devices.Disks {
@@ -1024,7 +1032,7 @@ func diskShapes(dx *domainXML) []model.Disk {
 }
 
 // nicShapes turns the XML interface list into model.Nics. Only the
-// interface types that back a real guest NIC make the cut.
+// interface types that back a real guest NIC are kept.
 func nicShapes(dx *domainXML) []model.Nic {
 	out := make([]model.Nic, 0, len(dx.Devices.Interfaces))
 	for _, xi := range dx.Devices.Interfaces {

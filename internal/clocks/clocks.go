@@ -4,7 +4,7 @@
 //
 // There are two families:
 //
-//   - Freshness knobs control how up to date the data is. They are
+//   - Freshness controls set how up to date the data is. They are
 //     user-facing and flag-configurable; the constants here are the flag
 //     defaults.
 //   - Failure bounds cap how long one bad thing can stall the process.
@@ -49,11 +49,11 @@ const UIRefresh = 1500 * time.Millisecond
 // browser-facing side of that. Deliberately not flags.
 const (
 	// SessionCookieMaxAge is how long the pademelon_session cookie stays
-	// valid in the browser. The cookie's value is the token itself, so
-	// rotating the token invalidates every issued cookie immediately — this
-	// constant only controls how often a human has to re-enter the token.
-	// It must outlive a typical browser session, or the "stay logged in"
-	// promise is a lie.
+	// valid in the browser. The cookie value is the token itself, so token
+	// rotation invalidates every issued cookie immediately. This constant
+	// only controls how often a human must re-enter the token. It must
+	// outlive a typical browser session, or the "stay logged in" promise
+	// is false.
 	SessionCookieMaxAge = 30 * 24 * time.Hour
 
 	// AuthBackoffBase is the delay after the first failed token attempt.
@@ -61,20 +61,20 @@ const (
 	AuthBackoffBase = 500 * time.Millisecond
 
 	// AuthBackoffMax caps the failed-attempt delay. It must stay low enough
-	// that a legitimate user who fat-fingers the token a few times isn't
+	// that a legitimate user who mistypes the token a few times is not
 	// locked out for minutes, and high enough that a brute-forcer gains
-	// nothing from hammering the endpoint.
+	// nothing from repeated attempts.
 	AuthBackoffMax = 30 * time.Second
 )
 
 // BalloonStaleAfter is how old balloon stats may be before libvirtsrc stops
 // trusting them and falls back to "allocated". A live guest refreshes them
 // on every query, so anything much older means the virtio_balloon driver in
-// the guest has gone quiet and QEMU is handing back a fossil.
+// the guest stopped answering. QEMU then returns an old reading.
 //
-// It must stay comfortably above the stats period: at poll time a reading is
-// roughly one to two collection periods old, so libvirtsrc.New warns at
-// startup when -stats-period gets within 2× of this threshold.
+// It must stay well above the stats period: at poll time a reading is
+// roughly one to two collection periods old. libvirtsrc.New therefore
+// warns at startup when -stats-period gets within 2× of this threshold.
 const BalloonStaleAfter = 5 * time.Minute
 
 // Failure bounds — deliberately not flags. One comment each, saying what
@@ -83,24 +83,24 @@ const (
 	// ProbeTimeout is the HTTP client timeout for the binary's self-probe
 	// (the Dockerfile's HEALTHCHECK runs `/pademelon -healthcheck`). It must
 	// stay shorter than the HEALTHCHECK --timeout in the Dockerfile, or
-	// Docker starts killing checks that would have passed.
+	// Docker fails checks that would otherwise pass.
 	// TestDockerfileHealthcheckTimeoutExceedsProbe in cmd/pademelon
 	// enforces that ordering.
 	ProbeTimeout = 3 * time.Second
 
 	// HeaderReadTimeout caps how long the HTTP server waits for request
-	// headers, so a slow client can't hold a connection open forever.
+	// headers, so a slow client cannot hold a connection open forever.
 	HeaderReadTimeout = 10 * time.Second
 
 	// ShutdownTimeout is how long graceful shutdown waits for in-flight
-	// requests before walking away.
+	// requests before it returns.
 	ShutdownTimeout = 5 * time.Second
 
 	// NudgeInterval is the minimum gap between poll nudges. The refresh
 	// button (and, in a later phase, a just-finished action) asks the poll
-	// loop for an out-of-band poll through a debounced channel; a nudge
-	// arriving sooner than this after the previous poll is dropped, so a
-	// browser hammering the refresh route can't hammer libvirt.
+	// loop for an out-of-band poll through a debounced channel. A nudge
+	// that arrives sooner than this after the previous poll is dropped, so
+	// a browser that refreshes rapidly cannot flood libvirt.
 	NudgeInterval = 5 * time.Second
 
 	// ActionTimeout is the hard wall-clock bound for one submitted action.
@@ -113,7 +113,7 @@ const (
 
 	// JobRetention is how long finished jobs stay in the registry before
 	// the lazy sweep drops them. Long enough to audit what happened over a
-	// working session; short enough that the map can't grow without bound.
+	// working session; short enough that the map cannot grow without bound.
 	JobRetention = time.Hour
 
 	// RebootTimeout bounds the wait phase of a reboot job: after the
@@ -123,4 +123,50 @@ const (
 	// bound is generous. A job that exceeds it ends as timeout with
 	// instructions rather than leaving a half-rebooted VM.
 	RebootTimeout = 3 * time.Minute
+)
+
+// TrueNAS middleware bounds (internal/truenas). The client runs on its own
+// background loop — dial, login, keepalive — and these bound each part of
+// it. Deliberately not flags: a homelab NAS that needs different values
+// here has bigger problems.
+const (
+	// MiddlewareTimeout caps one middleware request, dial included. It
+	// must be generous enough for login plus version on a busy NAS, short
+	// enough that a stuck middleware cannot hold the loop forever.
+	MiddlewareTimeout = 10 * time.Second
+
+	// MiddlewareKeepalive is how often the background loop proves the
+	// connection alive with core.ping. It is what keeps the status line
+	// truthful: without it, a silently dropped socket would keep saying
+	// "connected" until the next real call fails.
+	MiddlewareKeepalive = 60 * time.Second
+
+	// MiddlewareReconnectBackoff is the pause between reconnect attempts
+	// after a failure. The client retries patiently during a NAS reboot
+	// instead of in a tight loop; the next successful dial cancels the
+	// wait.
+	MiddlewareReconnectBackoff = 30 * time.Second
+
+	// SnapshotGatherBudget bounds one poll's whole snapshot-gathering
+	// round across every VM and dataset. Each request is already capped
+	// by MiddlewareTimeout, but ten datasets at ten seconds each would
+	// still stretch one poll to two minutes; the budget cuts the gather
+	// off, and the next poll (or the next nudge) finishes the job. Must
+	// stay well under DefaultPollInterval.
+	SnapshotGatherBudget = 15 * time.Second
+
+	// SnapshotActionTimeout is the hard bound for one snapshot job: the
+	// freeze, one middleware create per disk dataset, and the thaw. The
+	// freeze itself is quick on a healthy guest; the bound is generous so
+	// that a busy guest still answers fsfreeze after it syncs its disks.
+	// The thaw/resume still runs even when the job times out — the
+	// goroutine finishes its sequence.
+	SnapshotActionTimeout = 90 * time.Second
+
+	// FreezeHoldBound is how long a guest may stay frozen between the
+	// freeze and thaw of one snapshot job before the sweep force-thaws
+	// it. A frozen guest is a hung guest. This bound is a second guard
+	// behind the job's own guaranteed thaw: if the thaw step sticks or
+	// the process loses track, the sweep unfreezes within one bound.
+	FreezeHoldBound = 60 * time.Second
 )

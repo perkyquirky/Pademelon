@@ -46,9 +46,10 @@ func TestBalloonMemory(t *testing.T) {
 			wantOK:    true,
 		},
 		{
-			// Real values from a TrueNAS VM whose balloon driver had been
-			// silent for two days — these used to display as a confident
-			// "138 MiB / 1.3 GiB" that matched nothing inside the guest.
+			// Real values from a TrueNAS VM whose balloon driver was
+			// silent for two days — the dashboard used to display
+			// "138 MiB / 1.3 GiB" from them, numbers that matched
+			// nothing inside the guest.
 			name: "stale stats are rejected",
 			stats: []libvirt.DomainMemoryStat{
 				stat(memStatAvailable, 1355684),
@@ -93,8 +94,9 @@ func TestBalloonMemory(t *testing.T) {
 			wantOK:    true,
 		},
 		{
-			// A guest that reports MemAvailable above MemTotal is talking
-			// nonsense; fall back to MemFree rather than underflow.
+			// A guest whose MemAvailable exceeds MemTotal gives
+			// inconsistent values; fall back to MemFree rather than
+			// underflow.
 			name: "usable above total falls back to MemFree",
 			stats: []libvirt.DomainMemoryStat{
 				stat(memStatAvailable, 1000),
@@ -157,7 +159,7 @@ func TestLogMemoryStaleWarnsOnce(t *testing.T) {
 func TestNewWarnsWhenStatsPeriodNearStaleness(t *testing.T) {
 	// A collection period of 3m means readings are 3–6m old at poll time,
 	// while anything older than clocks.BalloonStaleAfter (5m) is rejected —
-	// so most readings would never survive. That deserves one warning.
+	// so the poller would reject most readings. That deserves one warning.
 	tests := []struct {
 		name        string
 		statsPeriod time.Duration
@@ -193,7 +195,7 @@ func agentEventMsg(id int32, state libvirt.ConnectDomainEventAgentLifecycleState
 }
 
 // waitUntil polls fn until it passes or the deadline runs out, so tests
-// that hand work to a goroutine don't guess at sleep durations.
+// that hand work to a goroutine do not guess at sleep durations.
 func waitUntil(t *testing.T, fn func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -269,8 +271,8 @@ func TestStartAgentEventsDeliversAndStopSilences(t *testing.T) {
 
 	s.stopAgentEvents()
 	// cancel() closes the context before it returns, so the drain
-	// goroutine's select has surely seen it by the time these sleeps are
-	// over; the point is "no deliveries after stop", not a timing guarantee.
+	// goroutine certainly sees the stop before these sleeps end; the
+	// point is "no deliveries after stop", not a timing guarantee.
 	time.Sleep(100 * time.Millisecond)
 	ch <- agentEventMsg(5, libvirt.ConnectDomainEventAgentLifecycleStateDisconnected)
 	time.Sleep(100 * time.Millisecond)

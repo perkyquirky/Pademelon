@@ -643,6 +643,34 @@ tr.detail > td { padding: 8px 12px 14px 30px; }
   font-size: 11.5px;
 }
 .note { color: var(--muted); font-size: 12.5px; }
+.note.warn { color: var(--warn-tx); }
+.snap-day {
+  margin: 7px 0 3px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.snap-day:first-child { margin-top: 0; }
+.snap {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12.5px;
+}
+.snap .snap-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.snap .sub { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.snap-act { display: flex; gap: 4px; margin-left: 8px; }
+.snap-btn { font-size: 11px; padding: 2px 8px; }
+.snap-btn.danger { color: var(--warn-tx); border-color: var(--warn-tx); }
+#restore-dialog { max-width: 480px; }
+#restore-dialog .ctl { display: flex; gap: 8px; margin: 6px 0; text-align: left; align-items: baseline; }
 #xml-dialog { max-width: 480px; }
 .xmlpre {
   max-height: 50vh;
@@ -875,8 +903,23 @@ button.btn-danger {
   </div>
 </dialog>
 
-<dialog id="confirm-dialog">
-  <h2 class="card-title" id="cf-title"></h2>
+<dialog id="restore-dialog">
+  <h2 class="card-title"><span class="squig">restore</span> → <span id="rs-name"></span></h2>
+  <p class="auth-hint" id="rs-summary"></p>
+  <label class="ctl"><input type="radio" name="rs-mode" value="staged" checked>
+    staged — stop the VM, roll back, optionally start again</label>
+  <label class="ctl"><input type="radio" name="rs-mode" value="direct">
+    direct — roll back in place, right now (the power tool)</label>
+  <label class="ctl" id="rs-start-label"><input type="checkbox" id="rs-start" checked>
+    start the VM again afterwards</label>
+  <p class="auth-hint" id="rs-warn"></p>
+  <div class="auth-actions">
+    <button type="button" id="rs-cancel">cancel</button>
+    <button type="button" id="rs-go">restore</button>
+  </div>
+</dialog>
+
+<dialog id="confirm-dialog">  <h2 class="card-title" id="cf-title"></h2>
   <p class="auth-hint" id="cf-desc"></p>
   <div class="auth-row">
     <button type="button" id="cf-cancel">cancel</button>
@@ -1006,8 +1049,8 @@ function guestInner(vm) {
   if (vm.clockDriftKnown) {
     const d = vm.clockDriftSeconds, abs = Math.abs(d);
     // Under a couple of seconds is clock noise between the two reads, not
-    // drift — showing it would just be anxiety fuel. A big positive gap is
-    // the classic paused-or-restored VM waiting for NTP to catch up.
+    // drift — showing it adds noise, not information. A big positive gap
+    // is the classic paused-or-restored VM waiting for NTP to catch up.
     if (abs < 2) {
       bits.push("clock in sync");
     } else {
@@ -1071,26 +1114,111 @@ function networkHtml(vm) {
   return `<div class="mini network"><h3>network</h3>${networkInner(vm)}</div>`;
 }
 
+// --- snapshots (zvol, via the TrueNAS middleware) ---------------------------
+
+// The list is fetched per VM on demand — /api/vms deliberately doesn't
+// carry it (a dataset with years of auto-* snapshots would bloat the main
+// fetch). Held here with a fetch time; an open panel refreshes when its
+// copy is older than one poll interval.
+const snapStore = new Map(); // domain -> { fetchedAt, data }
+const SNAP_STALE_MS = 30000;
+
+function snapshotsInner(domain, data) {
+  if (!capsTruenas) return `<div class="note">middleware integration not configured</div>`;
+  if (!data) return `<div class="note">loading…</div>`;
+  const g = data.truenas;
+  const bits = [];
+  if (g && g.error) bits.push(`<div class="note warn">middleware: ${esc(g.error)}</div>`);
+  else if (g && !g.connected) bits.push(`<div class="note">middleware offline — list may be stale</div>`);
+  const list = data.snapshots || [];
+  if (!list.length) {
+    bits.push(`<div class="note">no snapshots on this VM's disks${g && g.connected ? "" : " (list may be stale)"}</div>`);
+    return bits.join("");
+  }
+  const MAX = 50; // filters come later, once real auto-* volume is known
+  let lastDay = "";
+  for (const s of list.slice(0, MAX)) {
+    const when = new Date(s.created * 1000);
+    const day = when.toLocaleDateString();
+    if (day !== lastDay) {
+      bits.push(`<div class="snap-day">${esc(day)}</div>`);
+      lastDay = day;
+    }
+    const age = fmtDuration(Math.max(0, (Date.now() - when.getTime()) / 1000));
+    const size = s.used ? " · " + fmtBytes(s.used) : "";
+    const rowActions = capsActions
+      ? `<span class="snap-act">` +
+        `<button class="snap-btn" data-snaprestore="${esc(s.id)}" data-domain="${esc(domain)}" title="restore this snapshot (rewinds the disk)">restore…</button>` +
+        `<button class="snap-btn danger" data-snapdelete="${esc(s.id)}" data-domain="${esc(domain)}" title="delete this snapshot permanently">delete</button>` +
+        `</span>`
+      : "";
+    bits.push(`<div class="snap" title="${esc(s.id)}">` +
+      `<span class="snap-name">${esc(s.name || s.id)}</span>` +
+      `<span class="sub">${age} ago${size}</span>${rowActions}</div>`);
+  }
+  if (list.length > MAX) bits.push(`<div class="note">and ${list.length - MAX} more…</div>`);
+  return bits.join("");
+}
+
+function paintSnapshots(domain) {
+  const entry = store.get(domain);
+  if (!entry || !entry.refs.snapshotsEl) return;
+  const held = snapStore.get(domain);
+  entry.refs.snapshotsEl.innerHTML = snapshotsInner(domain, held && held.data);
+}
+
+async function refreshSnapshots(domain, force) {
+  const entry = store.get(domain);
+  if (!entry || !entry.open || !capsTruenas) return;
+  const held = snapStore.get(domain);
+  if (!force && held && Date.now() - held.fetchedAt < SNAP_STALE_MS) {
+    paintSnapshots(domain);
+    return;
+  }
+  try {
+    const res = await fetch(`/api/vm/${encodeURIComponent(domain)}/snapshots`, { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    snapStore.set(domain, { fetchedAt: Date.now(), data });
+    paintSnapshots(domain);
+  } catch (e) {
+    const cur = store.get(domain);
+    if (cur && cur.refs.snapshotsEl) {
+      cur.refs.snapshotsEl.innerHTML = `<div class="note warn">couldn't load snapshots: ${esc(e.message)}</div>`;
+    }
+  }
+}
+
 function detailHtml(vm, open) {
   const power = capsActions ? powerMenuHtml(vm) : "";
+  // The snapshot button needs both switches: actions (it queues a job)
+  // and the middleware (the snapshots actually land somewhere).
+  const snapBtn = capsActions && capsTruenas
+    ? `<button data-act="snapshot" data-domain="${esc(vm.domain)}" title="freeze the guest, snapshot its disks, thaw">snapshot…</button>`
+    : "";
   return `<tr class="detail" data-domain="${esc(vm.domain)}"${open ? "" : " hidden"}><td colspan="7">
     <div class="panel">
       <div class="panel-actions">
         ${power}
+        ${snapBtn}
         <button data-xml="${esc(vm.domain)}">raw xml</button>
         <span class="guestline"></span>
       </div>
       <div class="grid2">${drivesHtml(vm)}${networkHtml(vm)}</div>
+      <div class="mini snapshots" style="margin-top:12px"><h3>snapshots</h3><div class="snaplist"><div class="note">loading…</div></div></div>
     </div>
   </td></tr>`;
 }
 
 // --- power actions ----------------------------------------------------------
 
-// The menu doesn't police states — you're the orchestrator. Invalid
-// combinations get a clear refusal from the server (and the toast tells
-// you why), and force off is always there as the un-wedge button.
+// The menu does not police states — the user is the orchestrator.
+// Invalid combinations get a clear refusal from the server (and the
+// toast says why), and force off is always available as the recovery
+// button.
 let capsActions = false;
+let capsTruenas = false;
+let truenasStatus = null; // last /api/truenas reply; null until fetched
 
 function powerMenuHtml(vm) {
   const item = (act, label, danger) =>
@@ -1152,8 +1280,9 @@ function sig(vm) {
     ips, vm.os || "", vm.kernel || "",
     (vm.filesystems || []).map(f => f.mountpoint),
     // Structural bits for the expansion panel: which devices exist and
-    // what the agent calls itself. Rates update in place, so they don't
-    // belong here — rebuilding the row on every poll would fight the meters.
+    // what the agent calls itself. Rates update in place, so they do
+    // not belong here — rebuilding the row on every poll would work
+    // against the meters.
     (vm.disks || []).map(d => d.dev),
     (vm.nics || []).map(n => n.device),
     vm.agentVersion || ""
@@ -1218,7 +1347,8 @@ function buildRow(vm, open) {
       fsMeters: [...tr.children[6].querySelectorAll(".fs .meter")],
       drivesEl: detail.querySelector(".mini.drives"),
       netEl: detail.querySelector(".mini.network"),
-      guestEl: detail.querySelector(".guestline")
+      guestEl: detail.querySelector(".guestline"),
+      snapshotsEl: detail.querySelector(".snaplist")
     }
   };
 }
@@ -1269,6 +1399,9 @@ function renderVMs(vms) {
       entry.detailEl.replaceWith(fresh.detailEl);
       store.set(vm.domain, fresh);
       entry = fresh;
+      // A rebuilt panel loses its fetched list; repaint from the store
+      // so an open pouch keeps its snapshots without a refetch.
+      if (entry.open) paintSnapshots(vm.domain);
     } else {
       updateValues(entry.refs, vm);
       entry.el.classList.toggle("stopped", !vm.running);
@@ -1313,6 +1446,12 @@ async function tick() {
 
     renderVMs(vms);
 
+    // Open panels keep their snapshot lists fresh: repaint from the store,
+    // refetch only when the copy is older than one poll interval.
+    for (const [domain, entry] of store) {
+      if (entry.open) refreshSnapshots(domain, false);
+    }
+
     if (Date.now() >= statusHoldUntil && !selectionTouches(statusEl)) {
       if (snap.connected) {
         statusEl.className = "status";
@@ -1322,9 +1461,24 @@ async function tick() {
         statusEl.textContent = `libvirt disconnected — showing last known data. ${snap.error || ""}`;
       }
     }
+    // The middleware status is server-side bookkeeping (the client's own
+    // background loop owns the connection), so reading it costs nothing —
+    // worth piggybacking on the refresh loop.
+    if (capsTruenas) {
+      try {
+        const tnRes = await fetch("/api/truenas", { cache: "no-store" });
+        if (tnRes.ok) truenasStatus = await tnRes.json();
+      } catch (e) {
+        // keep the last known status; the next tick retries
+      }
+    }
     if (!selectionTouches(footEl)) {
-      footEl.textContent =
-        "refreshes every " + (REFRESH_MS / 1000) + "s · " + (capsActions ? "actions enabled" : "read-only") + " · made with ♥ (˶ˆᗜˆ˵)";
+      let foot = "refreshes every " + (REFRESH_MS / 1000) + "s · " + (capsActions ? "actions enabled" : "read-only");
+      if (capsTruenas && truenasStatus) {
+        foot = "TrueNAS " + (truenasStatus.connected ? "connected" : "offline") +
+          (truenasStatus.version ? " (" + truenasStatus.version + ")" : "") + " · " + foot;
+      }
+      footEl.textContent = foot + " · made with ♥ (˶ˆᗜˆ˵)";
     }
   } catch (e) {
     statusEl.className = "status bad";
@@ -1380,6 +1534,7 @@ async function checkCapabilities() {
     if (!res.ok) return;
     const caps = await res.json();
     capsActions = !!caps.actions;
+    capsTruenas = !!caps.truenas;
     if (capsActions) btnShutdownAll.hidden = false;
     renderVMs(latestVMs); // redraw the panels with or without power menus
     // A previous login may still be valid via the session cookie.
@@ -1442,6 +1597,7 @@ document.getElementById("rows").addEventListener("click", (e) => {
   entry.open = !entry.open;
   entry.el.classList.toggle("open", entry.open);
   entry.detailEl.hidden = !entry.open;
+  if (entry.open) refreshSnapshots(cell.dataset.domain, false);
 });
 
 // --- raw xml viewer --------------------------------------------------------
@@ -1496,6 +1652,93 @@ btnRefresh.addEventListener("click", async () => {
   setTimeout(() => { btnRefresh.disabled = false; }, REFRESH_COOLDOWN_MS);
 });
 
+// --- restore and delete (per snapshot) --------------------------------------
+
+// findSnap looks a snapshot up in the panel's fetched list — the same list
+// the server's id guard checks, so what the dialog offers is what the
+// backend will accept.
+function findSnap(domain, id) {
+  const held = snapStore.get(domain);
+  if (!held) return null;
+  return (held.data.snapshots || []).find(s => s.id === id) || null;
+}
+
+const restoreDialog = document.getElementById("restore-dialog");
+let rsCtx = null; // { domain, snap, newer, running }
+
+function openRestore(domain, snap) {
+  const vm = latestVMs.find(v => v.domain === domain);
+  const held = snapStore.get(domain);
+  const list = (held && held.data.snapshots) || [];
+  const newer = list.filter(s => s.dataset === snap.dataset && s.created > snap.created);
+  const running = !!(vm && vm.running);
+  rsCtx = { domain, snap, newer, running };
+
+  document.getElementById("rs-name").textContent = snap.name || snap.id;
+  document.getElementById("rs-summary").textContent =
+    `dataset ${snap.dataset} · created ${new Date(snap.created * 1000).toLocaleString()}` +
+    (vm ? ` · VM is ${vm.state}` : "");
+
+  const warnBits = [];
+  if (newer.length) {
+    warnBits.push(`rollback destroys ${newer.length} newer snapshot(s) on this dataset`);
+  } else {
+    warnBits.push("no newer snapshots on this dataset");
+  }
+  if (running) {
+    warnBits.push("the VM is running — the staged path stops it first; a direct rollback under a running guest can corrupt the disk");
+  }
+  document.getElementById("rs-warn").textContent = warnBits.join(". ") + ".";
+  document.getElementById("rs-start-label").style.display = "";
+  restoreDialog.showModal();
+}
+
+// The start-after checkbox only means something on the staged path.
+restoreDialog.addEventListener("change", () => {
+  const mode = restoreDialog.querySelector('input[name="rs-mode"]:checked').value;
+  document.getElementById("rs-start-label").style.display = mode === "staged" ? "" : "none";
+});
+
+document.getElementById("rs-cancel").addEventListener("click", () => restoreDialog.close());
+document.getElementById("rs-go").addEventListener("click", async () => {
+  if (!rsCtx) return;
+  const mode = restoreDialog.querySelector('input[name="rs-mode"]:checked').value;
+  const ack = rsCtx.newer.length > 0 || (mode === "direct" && rsCtx.running);
+  if (mode === "direct" && rsCtx.running) {
+    const again = await confirmBox(
+      `really roll back "${rsCtx.domain}" while it is running?`,
+      "second and final warning. a direct rollback under a running guest can corrupt the disk. the staged path is the safe one.",
+      "yes, roll back", true);
+    if (!again) return;
+  }
+  const body = JSON.stringify({
+    mode,
+    startAfter: mode === "staged" && document.getElementById("rs-start").checked,
+    ack,
+  });
+  try {
+    await apiSubmit(`/api/vm/${encodeURIComponent(rsCtx.domain)}/snapshot/${encodeURIComponent(rsCtx.snap.id)}/restore`, { body });
+    toast("restore requested — the job reports each stage");
+    restoreDialog.close();
+  } catch (err) {
+    toast(`restore: ${err.message}`);
+  }
+});
+
+async function confirmDelete(domain, snap) {
+  if (!(await confirmBox(
+    `delete "${snap.name || snap.id}"?`,
+    "this snapshot is destroyed permanently. the VM itself is not touched.",
+    "delete", true))) return;
+  try {
+    await apiSubmit(`/api/vm/${encodeURIComponent(domain)}/snapshot/${encodeURIComponent(snap.id)}`, { method: "DELETE" });
+    toast("delete requested");
+    setTimeout(() => refreshSnapshots(domain, true), 4000);
+  } catch (err) {
+    toast(`delete: ${err.message}`);
+  }
+}
+
 // --- power actions ----------------------------------------------------------
 
 // The toast writes to the status pill and holds it for a few seconds, so
@@ -1514,6 +1757,7 @@ const CONFIRMS = {
   restart:  vm => ({ title: `restart "${vm}"?`, desc: "the VM will shut down cleanly, then start again. unsaved work may be lost.", label: "restart", danger: false }),
   shutdown: vm => ({ title: `shut down "${vm}"?`, desc: "the VM gets a graceful shutdown request. unsaved work may be lost.", label: "shut down", danger: false }),
   "force-off": vm => ({ title: `force off "${vm}"?`, desc: "pulls the power cord. the VM gets no chance to save anything — only for a wedged VM.", label: "force off", danger: true }),
+  snapshot: vm => ({ title: `snapshot "${vm}" now?`, desc: "the guest's filesystems are frozen (or the VM paused) for a moment while its disks get zvol snapshots, then thawed. the TrueNAS UI will show the same snapshots.", label: "take snapshot", danger: false }),
 };
 
 const cfDialog = document.getElementById("confirm-dialog");
@@ -1539,9 +1783,12 @@ cfDialog.addEventListener("close", () => {
 
 // apiSubmit is the action fetch: CSRF header always, 401 opens the login
 // dialog, error bodies are little JSON envelopes with an "error" line.
-async function apiSubmit(path) {
+// opts carries an optional method (DELETE for snapshot deletes) and JSON
+// body (the restore options).
+async function apiSubmit(path, opts) {
   const res = await fetch(path, {
-    method: "POST",
+    method: (opts && opts.method) || "POST",
+    body: opts && opts.body,
     cache: "no-store",
     headers: { "X-Requested-With": "pademelon" },
   });
@@ -1612,11 +1859,33 @@ function closeMenus() {
 }
 
 document.getElementById("rows").addEventListener("click", (e) => {
+  // Snapshot-row buttons come first: they carry a snapshot id, not a
+  // per-VM verb, and open their own dialogs.
+  const rb = e.target.closest("[data-snaprestore]");
+  if (rb) {
+    const snap = findSnap(rb.dataset.domain, rb.dataset.snaprestore);
+    if (snap) openRestore(rb.dataset.domain, snap);
+    return;
+  }
+  const db = e.target.closest("[data-snapdelete]");
+  if (db) {
+    const snap = findSnap(db.dataset.domain, db.dataset.snapdelete);
+    if (snap) confirmDelete(db.dataset.domain, snap);
+    return;
+  }
   const mi = e.target.closest(".menu-item");
   if (mi) {
     if (mi.disabled) return;
     closeMenus();
     if (mi.dataset.act) handleAction(mi.dataset.domain, mi.dataset.act);
+    return;
+  }
+  // Panel-action buttons (the snapshot button) carry the same data-act
+  // contract as menu items, without the menu chrome.
+  const ab = e.target.closest("button[data-act]");
+  if (ab) {
+    if (ab.disabled) return;
+    handleAction(ab.dataset.domain, ab.dataset.act);
     return;
   }
   const mb = e.target.closest(".menu-btn");
