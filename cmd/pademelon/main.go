@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -244,7 +245,17 @@ func main() {
 		go sweepStore.SweepLoop(ctx)
 	}
 
-	go pollLoop(ctx, src, cache, *interval, nudge, truenasClient, log)
+	// The typed-nil trap, third occurrence. The web and actions layers
+	// have their guards; this call site is the one that panicked in
+	// production. A nil *truenas.Client passed straight into the
+	// middlewareSource interface is not a nil interface. pollLoop's nil
+	// check would pass, and the gather would dereference a dead client.
+	// Build the interface only when a real client sits behind it.
+	var tnLister middlewareSource
+	if truenasClient != nil {
+		tnLister = truenasClient
+	}
+	go pollLoop(ctx, src, cache, *interval, nudge, tnLister, log)
 
 	srv := &http.Server{
 		Addr:              *listen,
@@ -415,6 +426,13 @@ func resolveAllowActions(flagValue bool) (bool, error) {
 // previous poll's lists are carried over, so a middleware hiccup reads
 // as "stale", not as "your snapshots vanished".
 func gatherTruenasSnapshots(ctx context.Context, tn middlewareSource, snap *model.Snapshot, prev model.Snapshot, log *slog.Logger) {
+	// A second guard behind the call-site check: a typed-nil client
+	// inside the interface (the crash from 2026-09-07) must read as
+	// "integration off", not as a SIGSEGV mid-poll.
+	if tn == nil || reflect.ValueOf(tn).Kind() == reflect.Ptr && reflect.ValueOf(tn).IsNil() {
+		return
+	}
+
 	gctx, cancel := context.WithTimeout(ctx, clocks.SnapshotGatherBudget)
 	defer cancel()
 

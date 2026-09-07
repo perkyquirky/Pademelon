@@ -40,7 +40,7 @@ services:
       - "-agent-timeout=5s"
 
     # This is required for fresh memory statistics; without it, the data
-    # is stale. Do not adjust unless necessary
+    # is stale. Do not adjust unless necessary.
       - "-stats-period=10s"
 
     # Sets the level of logging: `debug`, `info`, `warn`, `error`
@@ -102,6 +102,35 @@ services:
 # says "requested", and the poller confirms the result.
 # ---------------------------------------------------------------
 
+# ---------------------------------------------------------------
+# TrueNAS middleware — OPTIONAL. The dashboard works fully without it;
+# this only powers the snapshot features (list, snapshot now, restore,
+# delete). You need:
+#
+#   1. A dedicated TrueNAS service account with an API key —
+#      setup recipe: documentation/truenas-service-account.md
+#      (three roles: SNAPSHOT_READ, SNAPSHOT_WRITE, SNAPSHOT_DELETE)
+#   2. The NAS address below.
+#
+# With a host set but no key, the container REFUSES to start — a
+# half-configured integration is a config error, not a degraded mode.
+# The service account needs snapshot privileges only. Snapshots that
+# Pademelon makes are ordinary ZFS snapshots, and they appear in the
+# TrueNAS UI too.
+#
+#    environment:
+#      - TRUENAS_HOST=192.168.1.100
+#      # Visible in `docker inspect` — the file form keeps it out:
+#      - TRUENAS_API_KEY_FILE=/run/secrets/truenas_api_key
+#    secrets:
+#      - truenas_api_key
+#
+# (secrets block at file level:)
+# secrets:
+#   truenas_api_key:
+#     file: ./truenas-api-key.txt
+# ---------------------------------------------------------------
+
 # Full example with actions enabled — copy these lines into your
 # service block if you want the power buttons:
 
@@ -123,6 +152,10 @@ services:
 #       - PADAMELON_TOKEN=change-me-to-your-generated-token
 #       # Unlocks the power actions. Needs the token above.
 #       - PADAMELON_ALLOW_ACTIONS=true
+#       # Optional: the TrueNAS middleware integration for snapshots.
+#       # See the block above and documentation/truenas-service-account.md
+#       - TRUENAS_HOST=192.168.1.100
+#       - TRUENAS_API_KEY=the-service-account-api-key
 
 secrets:
   pademelon_token:

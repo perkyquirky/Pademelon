@@ -327,3 +327,22 @@ func (s *slowLister) Snapshots(ctx context.Context, _ string) ([]truenas.Snapsho
 		return nil, ctx.Err()
 	}
 }
+
+// TestGatherSurvivesTypedNilClient is the regression test for the crash
+// in production on 2026-09-07: a nil *truenas.Client inside the
+// middlewareSource interface is not a nil interface, and the gather must
+// read that as "integration off" — a healthy poll followed by a SIGSEGV
+// is exactly what a dashboard must never do.
+func TestGatherSurvivesTypedNilClient(t *testing.T) {
+	var client *truenas.Client // nil pointer, non-nil interface once wrapped
+	snap := model.Snapshot{VMs: []model.VM{{
+		Domain: "14_alpine_test",
+		Disks:  []model.Disk{{Dev: "vda", Source: "/dev/zvol/nvme/vms/x"}},
+	}}}
+
+	gatherTruenasSnapshots(context.Background(), client, &snap, model.Snapshot{}, slog.Default())
+
+	if snap.Truenas != nil {
+		t.Errorf("gather with a dead client must leave the middleware block off, got %+v", snap.Truenas)
+	}
+}
