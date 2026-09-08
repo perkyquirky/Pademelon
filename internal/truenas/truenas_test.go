@@ -558,6 +558,13 @@ func TestPendingFailedWhenConnectionDies(t *testing.T) {
 	// the way a NAS restart would.
 	time.Sleep(50 * time.Millisecond)
 	f.dropConnections()
+	// The stall's job is done — the in-flight call learns "connection
+	// lost" from the client's own read-loop death, never from this fake's
+	// reply. Without resetting it, every reconnect's version proof stalls
+	// too, and the client could never come back within the test's wait.
+	f.mu.Lock()
+	f.delay = 0
+	f.mu.Unlock()
 
 	select {
 	case err := <-errCh:
