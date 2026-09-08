@@ -32,6 +32,8 @@ type fakeMiddleware struct {
 	snapshots map[string][]Snapshot // dataset -> canned list for pool.snapshot.query
 	created   map[string]string     // ids this fake accepted via pool.snapshot.create
 
+	conns []*websocket.Conn // every accepted connection, for test-side kills
+
 	failLogin      bool
 	notifications  int           // unsolicited messages sent before the version reply
 	closeAfterPing bool          // drop the connection after the first keepalive
@@ -51,6 +53,7 @@ func newFake(t *testing.T, tls bool) *fakeMiddleware {
 
 		f.mu.Lock()
 		f.accepted++
+		f.conns = append(f.conns, conn)
 		f.mu.Unlock()
 
 		for {
@@ -209,6 +212,19 @@ func (f *fakeMiddleware) replyError(conn *websocket.Conn, id json.RawMessage) {
 	_ = conn.Write(context.Background(), websocket.MessageText, body)
 }
 
+// dropConnections closes every live fake connection directly —
+// httptest's CloseClientConnections does not reach hijacked websocket
+// sockets, so tests that simulate a NAS restart call this.
+func (f *fakeMiddleware) dropConnections() {
+	f.mu.Lock()
+	conns := f.conns
+	f.conns = nil
+	f.mu.Unlock()
+	for _, conn := range conns {
+		conn.CloseNow()
+	}
+}
+
 func (f *fakeMiddleware) count() (conns int, violations []string, logins []map[string]any) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -216,16 +232,18 @@ func (f *fakeMiddleware) count() (conns int, violations []string, logins []map[s
 }
 
 // testConfig is the fast-forward config every client test uses: tiny
-// timers so the reconnect and keepalive paths run in milliseconds.
+// timers so the reconnect, keepalive and retry-floor paths run in
+// milliseconds.
 func testConfig(f *fakeMiddleware) Config {
 	return Config{
-		Host:      f.url,
-		Username:  "pademelon",
-		APIKey:    "test-key",
-		Timeout:   500 * time.Millisecond,
-		Keepalive: 50 * time.Millisecond,
-		Backoff:   10 * time.Millisecond,
-		Log:       slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Host:       f.url,
+		Username:   "pademelon",
+		APIKey:     "test-key",
+		Timeout:    500 * time.Millisecond,
+		Keepalive:  50 * time.Millisecond,
+		Backoff:    10 * time.Millisecond,
+		RetryFloor: 10 * time.Millisecond,
+		Log:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
@@ -473,4 +491,83 @@ func TestCreateSnapshot(t *testing.T) {
 	if id != want {
 		t.Errorf("id = %q, want %q", id, want)
 	}
+}
+
+// TestConnectionSurvivesSlowReply is the regression test for the live
+// failure of 2026-09-07 ("use of closed network connection"): a reply
+// slower than the call bound used to stop the read and kill the
+// connection. Now the timeout bounds the wait only — the next call on
+// the same connection works, and the late reply is skipped harmlessly.
+func TestConnectionSurvivesSlowReply(t *testing.T) {
+	f := newFake(t, false)
+	f.delay = 2 * time.Second // slower than the 500ms call bound
+	c, _ := New(testConfig(f))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+	waitFor(t, c, func(s Status) bool { return s.Connected })
+
+	// The handshake's own version call was the fast first one; this one
+	// hits the delay and times out.
+	if _, err := c.Call(context.Background(), "system.version"); err == nil {
+		t.Fatal("a slower-than-bound reply should time the call out")
+	}
+
+	// The connection must survive the timeout. Clear the delay and keep
+	// calling: the fake finishes its one long sleep, after which replies
+	// are instant. The next call in the retry then rides the same
+	// session.
+	f.mu.Lock()
+	f.delay = 0
+	f.mu.Unlock()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		res, err := c.Call(context.Background(), "system.version")
+		if err == nil {
+			if !strings.Contains(string(res), "TrueNAS-TEST") {
+				t.Errorf("unexpected result: %s", res)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("call after a timed-out call: %v — the connection did not survive", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// TestPendingFailedWhenConnectionDies: a call in flight when the socket
+// dies gets "connection lost" promptly — no caller waits out its full
+// timeout against a dead connection.
+func TestPendingFailedWhenConnectionDies(t *testing.T) {
+	f := newFake(t, false)
+	f.delay = 2 * time.Second
+	c, _ := New(testConfig(f))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+	waitFor(t, c, func(s Status) bool { return s.Connected })
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := c.Call(context.Background(), "system.version")
+		errCh <- err
+	}()
+
+	// The call is now in flight against a stalling fake. Kill the socket
+	// the way a NAS restart would.
+	time.Sleep(50 * time.Millisecond)
+	f.dropConnections()
+
+	select {
+	case err := <-errCh:
+		if !strings.Contains(err.Error(), "connection lost") {
+			t.Errorf("in-flight call error = %v, want the connection-lost reason", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight call never learned the connection died")
+	}
+
+	// The client recovers on its own.
+	waitFor(t, c, func(s Status) bool { return s.Connected })
 }

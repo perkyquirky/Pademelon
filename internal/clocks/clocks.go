@@ -147,6 +147,12 @@ const (
 	// wait.
 	MiddlewareReconnectBackoff = 30 * time.Second
 
+	// MiddlewareRetryFloor is the minimum pause before reconnecting after
+	// a live connection dies — short, so a transient close costs seconds
+	// not the full backoff, but long enough that a server which closes
+	// every connection immediately cannot drive a rapid retry loop.
+	MiddlewareRetryFloor = 5 * time.Second
+
 	// SnapshotGatherBudget bounds one poll's whole snapshot-gathering
 	// round across every VM and dataset. Each request is already capped
 	// by MiddlewareTimeout, but ten datasets at ten seconds each would

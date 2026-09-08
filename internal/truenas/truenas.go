@@ -1,9 +1,8 @@
 // Package truenas speaks the TrueNAS middleware's websocket API: JSON-RPC
 // 2.0 over wss, the only supported surface since the removal of the REST
 // API (IDEAS-EXPLORED.md §8). Everything here is read-only in spirit —
-// Stage 1 wires up connection, login and status; later stages add the
-// snapshot calls, which live behind internal/actions like every other
-// write.
+// the snapshot calls are typed methods; the write-side orchestration
+// lives behind internal/actions like every other write.
 //
 // Shapes settled by live recon against 25.10.5, and enforced by tests:
 //
@@ -11,11 +10,18 @@
 //     slice marshals to null and the server rejects that with -32600.
 //   - auth.login_ex with mechanism "API_KEY_PLAIN" takes username + api_key
 //     and answers {"response_type": "SUCCESS", ...}.
-//   - the server may send unsolicited notifications at any time; replies
-//     are matched by id and everything else is skipped, never fatal.
+//   - the server may send unsolicited notifications at any time; the read
+//     loop consumes them, never fatally.
 //   - a refused call comes back as -32001 with errno 13 (EACCES) — the
 //     service account's privilege is the scope, so the client surfaces the
 //     error verbatim rather than rewording it.
+//
+// Connection design, from a failure seen in live use: one reader
+// goroutine owns all reads for the life of the connection. It answers
+// control frames (the server closes a session with no reader),
+// consumes unsolicited messages, and dispatches replies to waiting calls
+// by id. Call timeouts bound the wait for a reply, never the read — a
+// slow reply costs one timed-out call, not the connection.
 package truenas
 
 import (
@@ -66,11 +72,13 @@ type Config struct {
 	// NAS shipping a self-signed cert (IDEAS-EXPLORED.md §8.2).
 	CAFile string
 
-	// Timeout, Keepalive and Backoff override the clocks constants when
-	// positive. Injectable so tests do not wait on real seconds.
-	Timeout   time.Duration
-	Keepalive time.Duration
-	Backoff   time.Duration
+	// Timeout, Keepalive, Backoff and RetryFloor override the clocks
+	// constants when positive. Injectable so tests do not wait on real
+	// seconds.
+	Timeout    time.Duration
+	Keepalive  time.Duration
+	Backoff    time.Duration
+	RetryFloor time.Duration
 
 	Log *slog.Logger
 }
@@ -85,20 +93,31 @@ type Status struct {
 	Since     time.Time `json:"since"`
 }
 
+// callResult is what the read loop hands a waiting call.
+type callResult struct {
+	data json.RawMessage
+	err  error
+}
+
 // Client owns the one middleware connection. The background Run loop dials,
-// logs in and keeps the connection proven; Call rides that connection. A
-// single in-flight request at a time (the round-trip mutex) is plenty at
-// homelab scale and keeps reply-matching trivially correct.
+// logs in and keeps the connection proven; Call rides that connection.
+// Writes are serialized (one writer at a time on a websocket); reads belong
+// exclusively to the per-connection read loop.
 type Client struct {
 	cfg Config
 	log *slog.Logger
 	tls *tls.Config
 
-	// mu guards the connection and the id counter, and is held for the
-	// whole of a request/response round trip.
-	mu     sync.Mutex
-	conn   *websocket.Conn
-	nextID int
+	connMu       sync.Mutex
+	conn         *websocket.Conn
+	readerCancel context.CancelFunc
+	pending      map[int64]chan callResult
+	nextID       int64
+
+	writeMu sync.Mutex // one writer at a time on the socket
+
+	// dead carries one signal per lost connection; Run waits on it.
+	dead chan struct{}
 
 	stateMu sync.RWMutex
 	state   Status
@@ -133,7 +152,13 @@ func New(cfg Config) (*Client, error) {
 		tlsCfg = &tls.Config{RootCAs: pool}
 	}
 
-	return &Client{cfg: cfg, log: cfg.Log, tls: tlsCfg}, nil
+	return &Client{
+		cfg:     cfg,
+		log:     cfg.Log,
+		tls:     tlsCfg,
+		pending: map[int64]chan callResult{},
+		dead:    make(chan struct{}, 1),
+	}, nil
 }
 
 // dialURL turns the configured host into the websocket address.
@@ -173,9 +198,9 @@ func (c *Client) setState(connected bool, version, errMsg string) {
 }
 
 // Run maintains the connection until ctx is done: dial, login, keepalive
-// pings, and a reconnect loop with a pause between attempts for the times
-// the NAS is down or rebooting. It is the only writer of the connection;
-// Call borrows it.
+// pings, and a reconnect loop with a pause between attempts for the
+// times the NAS is down or rebooting. It owns the connection lifecycle;
+// Call borrows the connection, and the read loop owns its reads.
 func (c *Client) Run(ctx context.Context) {
 	keepalive := c.cfg.Keepalive
 	if keepalive <= 0 {
@@ -184,6 +209,10 @@ func (c *Client) Run(ctx context.Context) {
 	backoff := c.cfg.Backoff
 	if backoff <= 0 {
 		backoff = clocks.MiddlewareReconnectBackoff
+	}
+	retryFloor := c.cfg.RetryFloor
+	if retryFloor <= 0 {
+		retryFloor = clocks.MiddlewareRetryFloor
 	}
 
 	ticker := time.NewTicker(keepalive)
@@ -206,21 +235,39 @@ func (c *Client) Run(ctx context.Context) {
 
 		select {
 		case <-ctx.Done():
-			c.mu.Lock()
-			conn := c.conn
-			c.conn = nil
-			c.mu.Unlock()
-			if conn != nil {
-				_ = conn.Close(websocket.StatusNormalClosure, "shutdown")
-			}
+			c.drop(errors.New("client shut down"))
 			return
+		case <-c.dead:
+			// The read loop lost the connection. Tear the dead
+			// connection down so nothing writes to it again, then
+			// recover quickly — a transient close should cost seconds,
+			// not the full backoff — but keep the floor so a server
+			// that closes connections immediately cannot drive a
+			// rapid retry loop.
+			c.drop(errors.New("connection lost"))
+			c.log.Info("middleware connection lost; reconnecting")
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(retryFloor):
+			}
 		case <-ticker.C:
 			pctx, cancel := context.WithTimeout(ctx, c.timeout())
 			_, err := c.Call(pctx, "core.ping")
 			cancel()
 			if err != nil && ctx.Err() == nil {
-				c.log.Warn("middleware keepalive failed; reconnecting", "err", err)
-				c.drop(err)
+				// Only dead-socket evidence drops the connection. A
+				// timeout with the read loop still alive means a busy
+				// server, not a dead socket — dropping then would tear
+				// down healthy in-flight traffic. If the socket is
+				// really gone, the read loop reports it and the dead
+				// channel fires.
+				if isDeadSocketErr(err) {
+					c.log.Warn("middleware keepalive failed; reconnecting", "err", err)
+					c.drop(err)
+				} else {
+					c.log.Warn("middleware keepalive timed out; retrying", "err", err)
+				}
 			}
 		}
 	}
@@ -229,28 +276,45 @@ func (c *Client) Run(ctx context.Context) {
 // ensureConnected dials, logs in and fills in the version — or records the
 // failure in the status for the UI to show.
 func (c *Client) ensureConnected(ctx context.Context) error {
-	c.mu.Lock()
+	c.connMu.Lock()
 	if c.conn != nil {
-		c.mu.Unlock()
+		c.connMu.Unlock()
 		return nil
 	}
-	c.mu.Unlock()
+	c.connMu.Unlock()
 
 	conn, err := c.dial(ctx)
 	if err != nil {
 		c.setState(false, "", err.Error())
 		return err
 	}
-	if err := c.handshake(ctx, conn); err != nil {
-		conn.CloseNow()
-		c.setState(false, "", err.Error())
+
+	// The read loop starts before the login: it delivers the login's
+	// reply. Reads never carry a deadline — a per-call timeout must not
+	// corrupt the framing — so the loop lives on a connection-scoped
+	// context that drop() cancels.
+	rctx, cancel := context.WithCancel(ctx)
+	c.connMu.Lock()
+	c.readerCancel = cancel
+	c.connMu.Unlock()
+	go c.readLoop(rctx, conn)
+
+	if err := c.login(ctx, conn); err != nil {
+		c.drop(err)
 		return err
 	}
 
-	c.mu.Lock()
+	c.connMu.Lock()
 	c.conn = conn
-	c.mu.Unlock()
+	c.connMu.Unlock()
 	c.log.Info("connected to TrueNAS middleware", "host", c.cfg.Host)
+
+	// A stale loss signal from a previous connection must not delay the
+	// new one.
+	select {
+	case <-c.dead:
+	default:
+	}
 
 	// The version round-trip doubles as the first proof the session is
 	// really good; a failure here drops back into the retry loop.
@@ -268,13 +332,45 @@ func (c *Client) ensureConnected(ctx context.Context) error {
 	return nil
 }
 
-// drop tears the connection down and records why. Nothing here retries —
-// Run's loop is the retry.
+// login authenticates one fresh connection: the key check happens here,
+// the certificate check in dial.
+func (c *Client) login(ctx context.Context, conn *websocket.Conn) error {
+	lctx, cancel := context.WithTimeout(ctx, c.timeout())
+	defer cancel()
+	res, err := c.request(lctx, conn, "auth.login_ex", map[string]any{
+		"mechanism": "API_KEY_PLAIN",
+		"username":  c.cfg.Username,
+		"api_key":   c.cfg.APIKey,
+	})
+	if err != nil {
+		return fmt.Errorf("login: %w", err)
+	}
+	var auth struct {
+		ResponseType string `json:"response_type"`
+	}
+	if err := json.Unmarshal(res, &auth); err != nil {
+		return fmt.Errorf("login: decode result %.120s: %w", res, err)
+	}
+	if auth.ResponseType != "SUCCESS" {
+		return fmt.Errorf("login: response_type %q", auth.ResponseType)
+	}
+	return nil
+}
+
+// drop tears the connection down and records why. The read loop dies with
+// the socket; anything waiting for a reply gets the reason. Nothing here
+// retries — Run's loop is the retry.
 func (c *Client) drop(err error) {
-	c.mu.Lock()
+	c.connMu.Lock()
 	conn := c.conn
 	c.conn = nil
-	c.mu.Unlock()
+	cancel := c.readerCancel
+	c.readerCancel = nil
+	c.failPendingLocked(err)
+	c.connMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if conn != nil {
 		conn.CloseNow()
 	}
@@ -296,48 +392,18 @@ func (c *Client) dial(ctx context.Context) (*websocket.Conn, error) {
 	return conn, nil
 }
 
-// handshake logs the connection in. It runs before the connection is
-// stored, so it uses roundTrip directly rather than Call.
-func (c *Client) handshake(ctx context.Context, conn *websocket.Conn) error {
-	hctx, cancel := context.WithTimeout(ctx, c.timeout())
-	defer cancel()
-	res, err := c.roundTrip(hctx, conn, "auth.login_ex", map[string]any{
-		"mechanism": "API_KEY_PLAIN",
-		"username":  c.cfg.Username,
-		"api_key":   c.cfg.APIKey,
-	})
-	if err != nil {
-		return fmt.Errorf("login: %w", err)
-	}
-	var auth struct {
-		ResponseType string `json:"response_type"`
-	}
-	if err := json.Unmarshal(res, &auth); err != nil {
-		return fmt.Errorf("login: decode result %.120s: %w", res, err)
-	}
-	if auth.ResponseType != "SUCCESS" {
-		return fmt.Errorf("login: response_type %q", auth.ResponseType)
-	}
-	return nil
-}
-
 // Call sends one request on the maintained connection and waits for the
-// matching reply. Concurrency model: one round trip at a time — middleware
-// calls are sub-second and Pademelon's callers are few, so the simple
-// lock is the better choice over a pending-request map in both code and
-// correctness.
+// matching reply. The timeout bounds the wait; the read loop continues
+// regardless, so a slow reply costs one failed call and never the
+// connection.
 func (c *Client) Call(ctx context.Context, method string, params ...any) (json.RawMessage, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.conn == nil {
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn == nil {
 		return nil, ErrNotConnected
 	}
-	cctx, cancel := context.WithTimeout(ctx, c.timeout())
-	defer cancel()
-	// The spread matters: forwarding params as a bare argument would wrap
-	// the slice in another array — the live server answered "Too many
-	// arguments" to exactly that before a test caught the shape.
-	return c.roundTrip(cctx, c.conn, method, params...)
+	return c.request(ctx, conn, method, params...)
 }
 
 type rpcError struct {
@@ -373,43 +439,118 @@ type rpcResponse struct {
 	Error   *rpcError       `json:"error"`
 }
 
-// roundTrip writes one request and reads until the reply with its id
-// arrives. Unsolicited messages (job progress, subscription pushes) are
-// skipped with a debug line — losing one never breaks a pending call.
-func (c *Client) roundTrip(ctx context.Context, conn *websocket.Conn, method string, params ...any) (json.RawMessage, error) {
+// request writes one request on the given connection and waits for the
+// reply the read loop delivers. Pending calls are registered under the
+// connection lock and dispatched by numeric id.
+func (c *Client) request(ctx context.Context, conn *websocket.Conn, method string, params ...any) (json.RawMessage, error) {
 	if params == nil {
 		params = []any{} // nil marshals to null; the server demands an array
 	}
+	c.connMu.Lock()
 	c.nextID++
-	id, _ := json.Marshal(c.nextID)
+	id := c.nextID
+	wait := make(chan callResult, 1)
+	c.pending[id] = wait
+	c.connMu.Unlock()
+	defer c.removePending(id)
+
 	req, _ := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
-		"id":      json.RawMessage(id),
+		"id":      id,
 		"method":  method,
 		"params":  params,
 	})
 
-	if err := conn.Write(ctx, websocket.MessageText, req); err != nil {
+	cctx, cancel := context.WithTimeout(ctx, c.timeout())
+	defer cancel()
+
+	c.writeMu.Lock()
+	err := conn.Write(cctx, websocket.MessageText, req)
+	c.writeMu.Unlock()
+	if err != nil {
 		return nil, fmt.Errorf("write %s: %w", method, err)
 	}
-	want := string(id)
+
+	select {
+	case res := <-wait:
+		if res.err != nil {
+			return nil, fmt.Errorf("%s: %w", method, res.err)
+		}
+		return res.data, nil
+	case <-cctx.Done():
+		return nil, fmt.Errorf("%s: %w", method, cctx.Err())
+	}
+}
+
+// readLoop owns the connection's reads until the context is cancelled or
+// the socket dies. It answers control frames (the server closes sessions
+// that never read), consumes unsolicited messages, and dispatches replies
+// to waiting calls by id.
+func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", method, err)
+			c.failPending(fmt.Errorf("connection lost: %w", err))
+			select {
+			case c.dead <- struct{}{}:
+			default:
+			}
+			return
 		}
 		var r rpcResponse
-		if err := json.Unmarshal(data, &r); err != nil {
-			return nil, fmt.Errorf("decode %s reply: %w (%.120s)", method, err, data)
+		if json.Unmarshal(data, &r) != nil {
+			c.log.Debug("middleware sent undecodable message", "payload", string(data))
+			continue
 		}
-		if string(r.ID) != want {
-			c.log.Debug("skipping unsolicited middleware message", "while_waiting_for", method, "payload", string(data))
+		if len(r.ID) == 0 {
+			c.log.Debug("middleware notification", "payload", string(data))
+			continue
+		}
+		var id int64
+		if json.Unmarshal(r.ID, &id) != nil {
+			c.log.Debug("middleware reply with unreadable id", "payload", string(data))
+			continue
+		}
+		c.connMu.Lock()
+		wait, ok := c.pending[id]
+		if ok {
+			delete(c.pending, id)
+		}
+		c.connMu.Unlock()
+		if !ok {
+			// A reply for a call that already timed out: the connection
+			// is healthy, the caller just stopped waiting.
+			c.log.Debug("late middleware reply, no caller waiting", "id", id)
 			continue
 		}
 		if r.Error != nil {
-			return nil, r.Error
+			wait <- callResult{err: r.Error}
+		} else {
+			wait <- callResult{data: r.Result}
 		}
-		return r.Result, nil
+	}
+}
+
+// removePending forgets a call whose caller stopped waiting (timeout,
+// cancelled context). The read loop skips its late reply when it arrives.
+func (c *Client) removePending(id int64) {
+	c.connMu.Lock()
+	delete(c.pending, id)
+	c.connMu.Unlock()
+}
+
+// failPending hands every waiting call the connection's reason. Called
+// when the read loop dies or the connection is dropped.
+func (c *Client) failPending(err error) {
+	c.connMu.Lock()
+	c.failPendingLocked(err)
+	c.connMu.Unlock()
+}
+
+func (c *Client) failPendingLocked(err error) {
+	for id, wait := range c.pending {
+		delete(c.pending, id)
+		wait <- callResult{err: err}
 	}
 }
 
@@ -469,6 +610,30 @@ func (c *Client) Snapshots(ctx context.Context, dataset string) ([]Snapshot, err
 	return out, nil
 }
 
+// CreateSnapshot takes one snapshot on one dataset. The middleware call is
+// fast (copy-on-write); the caller owns the sequencing — this method
+// deliberately knows nothing about freezing guests. The returned id is the
+// full "dataset@name" handle.
+func (c *Client) CreateSnapshot(ctx context.Context, dataset, name string) (string, error) {
+	res, err := c.Call(ctx, "pool.snapshot.create", map[string]any{
+		"dataset": dataset,
+		"name":    name,
+	})
+	if err != nil {
+		return "", err
+	}
+	var r struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(res, &r); err != nil {
+		return "", fmt.Errorf("decode create result: %w (%.120s)", err, res)
+	}
+	if r.ID == "" {
+		return "", fmt.Errorf("create succeeded but the middleware sent no snapshot id")
+	}
+	return r.ID, nil
+}
+
 // RollbackSnapshot rewinds one dataset to one snapshot. When recursive is
 // true the middleware destroys any newer snapshots on the way — that flag
 // is the caller's acknowledgement of exactly that, never a silent default
@@ -511,28 +676,21 @@ func isNotFoundErr(err error) bool {
 	return strings.Contains(msg, "ENOENT") || strings.Contains(msg, "not found")
 }
 
-// CreateSnapshot takes one snapshot on one dataset. The middleware call is
-// fast (copy-on-write); the caller owns the sequencing — this method
-// deliberately knows nothing about freezing guests. The returned id is the
-// full "dataset@name" handle.
-func (c *Client) CreateSnapshot(ctx context.Context, dataset, name string) (string, error) {
-	res, err := c.Call(ctx, "pool.snapshot.create", map[string]any{
-		"dataset": dataset,
-		"name":    name,
-	})
-	if err != nil {
-		return "", err
+// isDeadSocketErr separates "the socket is gone" from "the server is
+// slow". Only the first drops the connection; a timeout with the read
+// loop still alive gets a retry, not a drop.
+func isDeadSocketErr(err error) bool {
+	if errors.Is(err, ErrNotConnected) {
+		return true
 	}
-	var r struct {
-		ID string `json:"id"`
+	if err == nil {
+		return false
 	}
-	if err := json.Unmarshal(res, &r); err != nil {
-		return "", fmt.Errorf("decode create result: %w (%.120s)", err, res)
-	}
-	if r.ID == "" {
-		return "", fmt.Errorf("create succeeded but the middleware sent no snapshot id")
-	}
-	return r.ID, nil
+	msg := err.Error()
+	return strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "connection lost") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "connection reset by peer")
 }
 
 // DatasetFromDiskSource converts a domain XML disk source to the
