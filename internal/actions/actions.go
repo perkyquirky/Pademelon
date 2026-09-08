@@ -136,8 +136,8 @@ type JobStep struct {
 }
 
 // Step states, in the order a healthy step moves through them. Skipped
-// marks a phase that did not apply (a guest already stopped; a guest
-// already quiesced); failed marks the phase that broke the job.
+// marks a phase that did not apply (a guest already stopped, a guest
+// already paused); failed marks the phase that broke the job.
 const (
 	StepPending = "pending"
 	StepActive  = "active"
@@ -149,13 +149,13 @@ const (
 // Step names. Stable strings: the page maps them to labels, so renaming
 // one is a UI-visible change on purpose.
 const (
-	StepStop      = "stop"
-	StepVerify    = "verify"
-	StepRollback  = "rollback"
-	StepStart     = "start"
-	StepQuiesce   = "quiesce"
-	StepSnapshot  = "snapshot"
-	StepUnquiesce = "unquiesce"
+	StepStop     = "stop"
+	StepVerify   = "verify"
+	StepRollback = "rollback"
+	StepStart    = "start"
+	StepPrepare  = "prepare"
+	StepSnapshot = "snapshot"
+	StepResume   = "resume"
 )
 
 // Sentinel errors. The web layer maps them onto status codes; everything
@@ -335,8 +335,8 @@ func allowedStates(a Action) map[string]bool {
 		// only way to stop a stuck guest.
 		return map[string]bool{"running": true, "paused": true}
 	case ActionSnapshot:
-		// Running guests get frozen (or suspended); a paused or stopped
-		// guest is already quiesced by definition.
+		// Running guests get frozen (or paused); a paused or stopped
+		// guest needs no hold.
 		return map[string]bool{"running": true, "paused": true, "stopped": true}
 	default:
 		return nil
@@ -681,7 +681,7 @@ func (s *Store) setStep(job *Job, name, state, detail string) {
 
 // stepsFor pre-builds a job's step list, in execution order. Phases that
 // may not apply stay pending — the runner marks them skipped when they
-// don't (a guest already stopped, a guest already quiesced), which the
+// don't (a guest already stopped, a guest already paused), which the
 // UI shows as a greyed pill rather than hiding the phase.
 func stepsFor(job *Job) {
 	switch job.Action {
@@ -700,9 +700,9 @@ func stepsFor(job *Job) {
 		}
 	case ActionSnapshot:
 		job.Steps = []JobStep{
-			{Name: StepQuiesce, State: StepPending},
+			{Name: StepPrepare, State: StepPending},
 			{Name: StepSnapshot, State: StepPending},
-			{Name: StepUnquiesce, State: StepPending},
+			{Name: StepResume, State: StepPending},
 		}
 	case ActionReboot:
 		job.Steps = []JobStep{
@@ -850,13 +850,13 @@ func (s *Store) executeDelete(job *Job) (string, error) {
 }
 
 // snapshot is the consistent-snapshot sequence from IDEAS-EXPLORED.md §8.4:
-// quiesce the guest, snapshot every disk dataset on the middleware, then
-// un-quiesce — with the un-quiesce guaranteed on every path, because a
-// frozen guest is a hung guest.
+// hold the guest still, snapshot every disk dataset on the middleware, then
+// let it run again. The release runs on every path, because a guest held
+// still is a guest that cannot work.
 //
-// The quiesce ladder: fsfreeze when the agent answers (the cleanest), a
-// suspend/resume for agentless or old-agent guests, and nothing at all for
-// a guest that is already paused — paused is quiesced by definition.
+// The hold is a filesystem freeze when the agent answers (the cleanest),
+// a pause for agentless or old-agent guests, and nothing at all for a
+// guest that is already paused or stopped — those need no hold.
 func (s *Store) snapshot(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) (string, error) {
 	if s.cfg.Truenas == nil {
 		return "", ErrMiddlewareOff
@@ -872,41 +872,41 @@ func (s *Store) snapshot(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) 
 	}
 	name := snapshotName(vm, s.cfg.Now())
 
-	// --- quiesce phase ------------------------------------------------
+	// --- hold phase -----------------------------------------------------
 	froze, suspended := false, false
 	var freezeErr error
 	if vm.State == "running" {
 		if vm.Agent == model.AgentOK {
-			s.setStep(job, StepQuiesce, StepActive, "freezing the guest's filesystems")
+			s.setStep(job, StepPrepare, StepActive, "freezing the guest's filesystems")
 			_, freezeErr = rawAgentCall(doms, dom, int32(s.cfg.AgentTimeout/time.Second), `{"execute":"guest-fsfreeze-freeze"}`)
 			if freezeErr == nil {
 				froze = true
 				s.frozenMark(job.Domain)
 			} else {
-				// An old agent without fsfreeze, or a transient hiccup —
-				// the suspend fallback quiesces just as well.
-				s.logDebug("fsfreeze failed, falling back to suspend", job.Domain, freezeErr)
-				s.setStep(job, StepQuiesce, StepActive, "fsfreeze failed, falling back to suspend")
+				// An old agent without fsfreeze, or a transient fault —
+				// a pause holds the guest just as well.
+				s.logDebug("fsfreeze failed, the job pauses the guest instead", job.Domain, freezeErr)
+				s.setStep(job, StepPrepare, StepActive, "fsfreeze did not answer; the job pauses the guest instead")
 			}
 		} else {
-			s.setStep(job, StepQuiesce, StepActive, "suspending the guest (no working agent for fsfreeze)")
+			s.setStep(job, StepPrepare, StepActive, "no agent for fsfreeze; the job pauses the guest")
 		}
 		if !froze {
 			if err := doms.DomainSuspend(dom); err != nil {
-				s.setStep(job, StepQuiesce, StepFailed,
-					fmt.Sprintf("could not quiesce the guest (freeze: %v, suspend: %v)", freezeErr, err))
-				return "", fmt.Errorf("could not quiesce the guest (freeze: %v, suspend: %w)", freezeErr, err)
+				s.setStep(job, StepPrepare, StepFailed,
+					fmt.Sprintf("could not hold the guest still (freeze: %v, pause: %v)", freezeErr, err))
+				return "", fmt.Errorf("could not hold the guest still (freeze: %v, pause: %w)", freezeErr, err)
 			}
 			suspended = true
 		}
 		switch {
 		case froze:
-			s.setStep(job, StepQuiesce, StepDone, "guest filesystems frozen")
+			s.setStep(job, StepPrepare, StepDone, "guest filesystems frozen")
 		case suspended:
-			s.setStep(job, StepQuiesce, StepDone, "guest paused for the shot")
+			s.setStep(job, StepPrepare, StepDone, "guest paused for the snapshot")
 		}
 	} else {
-		s.setStep(job, StepQuiesce, StepSkipped, "guest already quiesced ("+vm.State+")")
+		s.setStep(job, StepPrepare, StepSkipped, "guest already paused or stopped ("+vm.State+")")
 	}
 
 	// --- snapshot phase -------------------------------------------------
@@ -932,51 +932,51 @@ func (s *Store) snapshot(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) 
 			fmt.Sprintf("created %q on %d dataset(s)", name, len(created)))
 	}
 
-	// --- un-quiesce phase — runs on every path below --------------------
-	var unquiesceErrs []string
+	// --- release phase — runs on every path below -----------------------
+	var releaseErrs []string
 	if froze {
-		s.setStep(job, StepUnquiesce, StepActive, "thawing the guest's filesystems")
+		s.setStep(job, StepResume, StepActive, "thawing the guest's filesystems")
 		if err := s.thaw(doms, dom, job.Domain); err != nil {
-			unquiesceErrs = append(unquiesceErrs,
+			releaseErrs = append(releaseErrs,
 				"WARNING: guest may still be frozen — retry the snapshot's thaw via the sweep, or thaw manually: "+err.Error())
-			s.setStep(job, StepUnquiesce, StepFailed,
+			s.setStep(job, StepResume, StepFailed,
 				"WARNING: guest may still be frozen — retry the snapshot's thaw via the sweep, or thaw manually: "+err.Error())
 		} else {
-			s.setStep(job, StepUnquiesce, StepDone, "guest filesystems thawed")
+			s.setStep(job, StepResume, StepDone, "guest filesystems thawed")
 		}
 	}
 	if suspended {
-		s.setStep(job, StepUnquiesce, StepActive, "resuming the guest")
+		s.setStep(job, StepResume, StepActive, "un-pausing the guest")
 		if err := doms.DomainResume(dom); err != nil {
-			unquiesceErrs = append(unquiesceErrs, "WARNING: guest may still be paused: "+err.Error())
-			s.setStep(job, StepUnquiesce, StepFailed, "WARNING: guest may still be paused: "+err.Error())
+			releaseErrs = append(releaseErrs, "WARNING: guest may still be paused: "+err.Error())
+			s.setStep(job, StepResume, StepFailed, "WARNING: guest may still be paused: "+err.Error())
 		} else {
-			s.setStep(job, StepUnquiesce, StepDone, "guest resumed")
+			s.setStep(job, StepResume, StepDone, "guest runs again")
 		}
 	}
 	if !froze && !suspended {
-		s.setStep(job, StepUnquiesce, StepSkipped, "nothing to un-quiesce")
+		s.setStep(job, StepResume, StepSkipped, "nothing to resume")
 	}
 
 	// --- report -----------------------------------------------------------
-	quiesceNote := ""
-	if len(unquiesceErrs) > 0 {
-		quiesceNote = " " + strings.Join(unquiesceErrs, " ")
+	resumeNote := ""
+	if len(releaseErrs) > 0 {
+		resumeNote = " " + strings.Join(releaseErrs, " ")
 	}
 	if len(failed) > 0 {
 		return "", fmt.Errorf("snapshot %q failed on %d of %d dataset(s): %s.%s",
-			name, len(failed), len(datasets), strings.Join(failed, "; "), quiesceNote)
+			name, len(failed), len(datasets), strings.Join(failed, "; "), resumeNote)
 	}
 	detail := fmt.Sprintf("snapshot %q created on %d dataset(s)", name, len(created))
 	switch {
 	case froze:
-		detail += " — guest filesystems frozen during the shot, thawed after"
+		detail += " — guest filesystems frozen during the snapshot, thawed after"
 	case suspended:
-		detail += " — guest paused during the shot, resumed after"
+		detail += " — guest paused during the snapshot, un-paused after"
 	default:
-		detail += " — guest was already quiesced (paused or stopped)"
+		detail += " — the guest was already paused or stopped"
 	}
-	return detail + quiesceNote, nil
+	return detail + resumeNote, nil
 }
 
 // thaw unfreezes the guest's filesystems, retrying once — the guest's

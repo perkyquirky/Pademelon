@@ -478,8 +478,8 @@ func TestSnapshotHappyPathFrozen(t *testing.T) {
 	}
 }
 
-// TestSnapshotFallsBackToSuspend: no agent, so the guest is suspended
-// before the creates and resumed after — the symmetric fallback.
+// TestSnapshotFallsBackToSuspend: no agent, so the guest is paused
+// before the creates and un-paused after — the symmetric fallback.
 func TestSnapshotFallsBackToSuspend(t *testing.T) {
 	s := New(Config{
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -492,8 +492,8 @@ func TestSnapshotFallsBackToSuspend(t *testing.T) {
 	job := submitSnapshot(t, s)
 	got := waitForJob(t, s, job.ID, StateOK)
 
-	if !strings.Contains(got.Detail, "paused during the shot, resumed") {
-		t.Errorf("detail = %q, want the suspend/resume story", got.Detail)
+	if !strings.Contains(got.Detail, "paused during the snapshot, un-paused after") {
+		t.Errorf("detail = %q, want the pause/un-pause story", got.Detail)
 	}
 }
 
@@ -523,9 +523,9 @@ func TestSnapshotCreateFailureStillThaws(t *testing.T) {
 	}
 }
 
-// TestSnapshotPausedGuestSkipsQuiesce: a paused guest is already
-// quiesced — no freeze, no suspend, no resume, just creates.
-func TestSnapshotPausedGuestSkipsQuiesce(t *testing.T) {
+// TestSnapshotPausedGuestNeedsNoHold: a paused guest is already still —
+// no freeze, no pause, no un-pause, just creates.
+func TestSnapshotPausedGuestNeedsNoHold(t *testing.T) {
 	s := New(Config{
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Snapshot: snapWith(snapshotTestVM(model.AgentOK, "paused")),
@@ -537,8 +537,8 @@ func TestSnapshotPausedGuestSkipsQuiesce(t *testing.T) {
 	job := submitSnapshot(t, s)
 	got := waitForJob(t, s, job.ID, StateOK)
 
-	if !strings.Contains(got.Detail, "already quiesced") {
-		t.Errorf("detail = %q, want the already-quiesced story", got.Detail)
+	if !strings.Contains(got.Detail, "already paused or stopped") {
+		t.Errorf("detail = %q, want the already-paused story", got.Detail)
 	}
 }
 
@@ -1016,8 +1016,8 @@ func TestCloneDeepCopiesSteps(t *testing.T) {
 	}
 }
 
-// TestSnapshotStepsFrozen: the freeze path reports quiesce → snapshot →
-// unquiesce, all done, with the freeze story in the quiesce detail.
+// TestSnapshotStepsFrozen: the freeze path reports prepare → snapshot →
+// resume, all done, with the freeze story in the prepare detail.
 func TestSnapshotStepsFrozen(t *testing.T) {
 	doms := &fakeDomains{agentReply: `{"return":1}`}
 	mw := &fakeMiddleware{}
@@ -1026,13 +1026,13 @@ func TestSnapshotStepsFrozen(t *testing.T) {
 	job := submitSnapshot(t, s)
 	got := waitForJob(t, s, job.ID, StateOK)
 
-	mustStep(t, got, StepQuiesce, StepDone, "frozen")
+	mustStep(t, got, StepPrepare, StepDone, "frozen")
 	mustStep(t, got, StepSnapshot, StepDone, "dataset")
-	mustStep(t, got, StepUnquiesce, StepDone, "thawed")
+	mustStep(t, got, StepResume, StepDone, "thawed")
 }
 
 // TestSnapshotStepsSuspendFallback: the agent has no fsfreeze — the
-// quiesce step says so, and the suspend/resume pair still lands.
+// prepare step says so, and the pause/un-pause pair still lands.
 func TestSnapshotStepsSuspendFallback(t *testing.T) {
 	s := New(Config{
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -1045,12 +1045,12 @@ func TestSnapshotStepsSuspendFallback(t *testing.T) {
 	job := submitSnapshot(t, s)
 	got := waitForJob(t, s, job.ID, StateOK)
 
-	mustStep(t, got, StepQuiesce, StepDone, "paused for the shot")
-	mustStep(t, got, StepUnquiesce, StepDone, "resumed")
+	mustStep(t, got, StepPrepare, StepDone, "paused for the snapshot")
+	mustStep(t, got, StepResume, StepDone, "runs again")
 }
 
 // TestSnapshotStepsPartialFailureKeepsThawing: a create fails after the
-// freeze — the snapshot step goes failed, but the unquiesce step still
+// freeze — the snapshot step goes failed, but the resume step still
 // lands done. A frozen guest is a hung guest, whatever the job's verdict.
 func TestSnapshotStepsPartialFailureKeepsThawing(t *testing.T) {
 	doms := &fakeDomains{agentReply: `{"return":1}`}
@@ -1060,14 +1060,14 @@ func TestSnapshotStepsPartialFailureKeepsThawing(t *testing.T) {
 	job := submitSnapshot(t, s)
 	got := waitForJob(t, s, job.ID, StateFailed)
 
-	mustStep(t, got, StepQuiesce, StepDone, "frozen")
+	mustStep(t, got, StepPrepare, StepDone, "frozen")
 	mustStep(t, got, StepSnapshot, StepFailed, "dataset busy")
-	mustStep(t, got, StepUnquiesce, StepDone, "thawed")
+	mustStep(t, got, StepResume, StepDone, "thawed")
 }
 
-// TestSnapshotStepsAlreadyQuiesced: a paused guest skips the quiesce
-// phase visibly.
-func TestSnapshotStepsAlreadyQuiesced(t *testing.T) {
+// TestSnapshotStepsAlreadyHeld: a paused guest skips the prepare phase
+// visibly.
+func TestSnapshotStepsAlreadyHeld(t *testing.T) {
 	s := New(Config{
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Snapshot: snapWith(snapshotTestVM(model.AgentOK, "paused")),
@@ -1079,9 +1079,9 @@ func TestSnapshotStepsAlreadyQuiesced(t *testing.T) {
 	job := submitSnapshot(t, s)
 	got := waitForJob(t, s, job.ID, StateOK)
 
-	mustStep(t, got, StepQuiesce, StepSkipped, "already quiesced")
+	mustStep(t, got, StepPrepare, StepSkipped, "already paused or stopped")
 	mustStep(t, got, StepSnapshot, StepDone, "")
-	mustStep(t, got, StepUnquiesce, StepSkipped, "")
+	mustStep(t, got, StepResume, StepSkipped, "nothing to resume")
 }
 
 // TestRebootSteps: the reboot's pills mirror the restore's stop/verify
