@@ -119,6 +119,11 @@ type Client struct {
 	// dead carries one signal per lost connection; Run waits on it.
 	dead chan struct{}
 
+	// wake interrupts a reconnect backoff so the next dial attempt
+	// starts now. One slot, non-blocking: a wake that arrives while the
+	// connection is healthy is dropped, not queued.
+	wake chan struct{}
+
 	stateMu sync.RWMutex
 	state   Status
 }
@@ -158,6 +163,7 @@ func New(cfg Config) (*Client, error) {
 		tls:     tlsCfg,
 		pending: map[int64]chan callResult{},
 		dead:    make(chan struct{}, 1),
+		wake:    make(chan struct{}, 1),
 	}, nil
 }
 
@@ -184,6 +190,17 @@ func (c *Client) Status() Status {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 	return c.state
+}
+
+// Wake asks the Run loop to stop waiting out a reconnect backoff and dial
+// now. It is a hint for on-demand callers (a snapshot fetch after a
+// dropout): when the connection is healthy it does nothing, and a wake
+// that lands during a healthy stretch is consumed as a harmless no-op.
+func (c *Client) Wake() {
+	select {
+	case c.wake <- struct{}{}:
+	default:
+	}
 }
 
 // setState records a transition. Version is kept across failures — the
@@ -229,6 +246,10 @@ func (c *Client) Run(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-time.After(backoff):
+			case <-c.wake:
+				// An on-demand caller wants the list now; dial
+				// immediately instead of finishing the backoff.
+				c.log.Info("middleware reconnect pulled forward by a wake")
 			}
 			continue
 		}
@@ -250,7 +271,12 @@ func (c *Client) Run(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-time.After(retryFloor):
+			case <-c.wake:
+				c.log.Info("middleware reconnect pulled forward by a wake")
 			}
+		case <-c.wake:
+			// A wake during a healthy connection: nothing to do, the
+			// next keepalive proves the socket on its own schedule.
 		case <-ticker.C:
 			pctx, cancel := context.WithTimeout(ctx, c.timeout())
 			_, err := c.Call(pctx, "core.ping")

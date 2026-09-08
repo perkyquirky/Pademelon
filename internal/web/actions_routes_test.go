@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -41,7 +42,7 @@ func (f *fakeActions) List() []actions.Job { return f.list }
 func (f *fakeActions) ShutdownAll() ([]string, []string) {
 	return f.planned, f.skipped
 }
-func (f *fakeActions) SubmitRestore(domain string, opts actions.RestoreOpts) (*actions.Job, error) {
+func (f *fakeActions) SubmitRestore(_ context.Context, domain string, opts actions.RestoreOpts) (*actions.Job, error) {
 	f.lastDomain = domain
 	if f.err != nil {
 		return nil, f.err
@@ -49,7 +50,7 @@ func (f *fakeActions) SubmitRestore(domain string, opts actions.RestoreOpts) (*a
 	f.job = actions.Job{ID: "rest1", Domain: domain, Action: actions.ActionRestore, Snapshot: opts.SnapshotID, Mode: opts.Mode}
 	return &f.job, nil
 }
-func (f *fakeActions) SubmitDelete(domain, snapshotID string) (*actions.Job, error) {
+func (f *fakeActions) SubmitDelete(_ context.Context, domain, snapshotID string) (*actions.Job, error) {
 	f.lastDomain = domain
 	if f.err != nil {
 		return nil, f.err
@@ -343,6 +344,19 @@ func TestRestoreAndDeleteRoutes(t *testing.T) {
 	rec = postJSON(s, path, cookie, `{"mode":"direct","ack":false}`)
 	if rec.Code != http.StatusConflict {
 		t.Errorf("direct without ack = %d, want 409", rec.Code)
+	}
+
+	// A guard that could not verify (middleware down at submit time):
+	// 503 with the reason, never a 404 that would read as "no such
+	// snapshot".
+	fa.err = actions.ErrGuardUnavailable
+	rec = postJSON(s, path, cookie, `{"mode":"staged"}`)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "could not be verified") {
+		t.Errorf("unverifiable snapshot = %d %s, want 503", rec.Code, rec.Body.String())
+	}
+	rec = postDelete(s, "/api/vm/14_alpine_test/snapshot/nvme%2Fvms%2Fx%40pademelon-x-1", cookie)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("delete with unverifiable snapshot = %d, want 503", rec.Code)
 	}
 
 	// Unknown snapshot: 404.

@@ -571,3 +571,52 @@ func TestPendingFailedWhenConnectionDies(t *testing.T) {
 	// The client recovers on its own.
 	waitFor(t, c, func(s Status) bool { return s.Connected })
 }
+
+// TestWakeInterruptsReconnectBackoff: a client dialling an unreachable
+// NAS retries on the backoff. A wake pulls the next attempt forward —
+// visible as a second recorded failure long before the backoff would
+// have elapsed. This is what makes an on-demand snapshot fetch able to
+// trigger the reconnect instead of waiting it out.
+func TestWakeInterruptsReconnectBackoff(t *testing.T) {
+	c, err := New(Config{
+		Host:     "wss://127.0.0.1:1/api/current", // nothing listens: instant refusal
+		Username: "pademelon",
+		APIKey:   "test-key",
+		Timeout:  200 * time.Millisecond,
+		Backoff:  50 * time.Second, // without a wake, the second attempt is 50s away
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+
+	// The first failed attempt records itself; waitFor would time out at
+	// 3s if the wake did not pull the second attempt forward.
+	first := waitFor(t, c, func(s Status) bool { return !s.Connected && s.Error != "" })
+	c.Wake()
+	waitFor(t, c, func(s Status) bool { return s.Since.After(first.Since) && s.Error != "" })
+}
+
+// TestWakeDuringHealthyConnectionIsHarmless: the wake channel is a hint,
+// never a disruption — a healthy connection ignores it and stays up.
+func TestWakeDuringHealthyConnectionIsHarmless(t *testing.T) {
+	f := newFake(t, false)
+	c, _ := New(testConfig(f))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go c.Run(ctx)
+	waitFor(t, c, func(s Status) bool { return s.Connected })
+
+	c.Wake()
+	c.Wake()
+	c.Wake()
+
+	// The connection answers calls as if nothing happened.
+	waitFor(t, c, func(s Status) bool { return s.Connected })
+	if _, err := c.Call(context.Background(), "core.ping"); err != nil {
+		t.Errorf("call after wakes: %v — the wake must not disturb a healthy connection", err)
+	}
+}

@@ -7,11 +7,13 @@ package web
 // registers them.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 
 	"pademelon/internal/actions"
+	"pademelon/internal/clocks"
 )
 
 // The proof-of-origin header action POSTs must carry, and the value the
@@ -95,7 +97,12 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	job, err := s.actions.SubmitRestore(name, actions.RestoreOpts{
+	// The id guard may need a fresh middleware fetch, bounded so the
+	// submit cannot hang: it waits behind at most one in-flight fetch,
+	// then runs its own.
+	vctx, cancel := context.WithTimeout(r.Context(), clocks.SnapshotFetchBudget)
+	defer cancel()
+	job, err := s.actions.SubmitRestore(vctx, name, actions.RestoreOpts{
 		SnapshotID: snapshot,
 		Mode:       body.Mode,
 		StartAfter: body.StartAfter,
@@ -103,6 +110,11 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	})
 	switch {
 	case err == nil:
+	case errors.Is(err, actions.ErrGuardUnavailable):
+		// The id could not be checked against the middleware — "try
+		// again", not "no such snapshot".
+		s.actionJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
 	case errors.Is(err, actions.ErrUnknownDomain), errors.Is(err, actions.ErrUnknownSnapshot):
 		http.NotFound(w, r)
 		return
@@ -133,9 +145,15 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	name, snapshot := r.PathValue("name"), r.PathValue("snapshot")
 
-	job, err := s.actions.SubmitDelete(name, snapshot)
+	// Same bounded guard as the restore route.
+	vctx, cancel := context.WithTimeout(r.Context(), clocks.SnapshotFetchBudget)
+	defer cancel()
+	job, err := s.actions.SubmitDelete(vctx, name, snapshot)
 	switch {
 	case err == nil:
+	case errors.Is(err, actions.ErrGuardUnavailable):
+		s.actionJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
+		return
 	case errors.Is(err, actions.ErrUnknownDomain), errors.Is(err, actions.ErrUnknownSnapshot):
 		http.NotFound(w, r)
 		return

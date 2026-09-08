@@ -96,16 +96,6 @@ type ZfsSnapshot struct {
 	Referenced uint64 `json:"referenced"`
 }
 
-// TruenasGather rides each Snapshot (the poll result) and says how the
-// middleware snapshot gathering went this round. Nil means the
-// integration is off.
-type TruenasGather struct {
-	Connected bool      `json:"connected"`
-	Version   string    `json:"version,omitempty"`
-	Error     string    `json:"error,omitempty"` // this round's gather failure, if any
-	At        time.Time `json:"at"`
-}
-
 // VM is everything Pademelon knows about one virtual machine.
 type VM struct {
 	// Identity. Domain is what libvirt calls it ("12_test"); ID and Name are
@@ -145,13 +135,6 @@ type VM struct {
 
 	Interfaces  []Iface      `json:"interfaces"`
 	Filesystems []Filesystem `json:"filesystems"`
-
-	// Snapshots holds the zvol snapshots of this VM's disk datasets,
-	// gathered by the poll loop from the TrueNAS middleware when the
-	// integration is on. Deliberately not in the JSON — a dataset with
-	// years of periodic snapshots would bloat /api/vms, which is fetched
-	// every 1.5s; only /api/vm/{name}/snapshots serves them.
-	Snapshots []ZfsSnapshot `json:"-"`
 
 	// Host-side shapes from the domain XML, with rates filled in while the
 	// VM runs. These work whether or not the guest has an agent.
@@ -201,13 +184,14 @@ func (v VM) PrimaryIPs() []string {
 }
 
 // Snapshot is one complete poll result, and what the JSON API hands out.
+// Zvol snapshots are not part of it: the middleware lists them on demand
+// (internal/snapshots), never on the poll timer.
 type Snapshot struct {
-	VMs       []VM           `json:"vms"`
-	Polled    time.Time      `json:"polled"`
-	PollMS    int64          `json:"pollMs"`
-	Connected bool           `json:"connected"`
-	Error     string         `json:"error,omitempty"`
-	Truenas   *TruenasGather `json:"truenas,omitempty"` // nil when the middleware integration is off
+	VMs       []VM      `json:"vms"`
+	Polled    time.Time `json:"polled"`
+	PollMS    int64     `json:"pollMs"`
+	Connected bool      `json:"connected"`
+	Error     string    `json:"error,omitempty"`
 }
 
 // Cache holds the last good Snapshot. The poller writes it, HTTP handlers

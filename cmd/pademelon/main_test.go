@@ -1,17 +1,43 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"pademelon/internal/model"
-	"pademelon/internal/truenas"
 )
+
+// TestResolveSnapshotAutoRefresh pins the flag+env pair for the open-panel
+// snapshot refresh: the flag is the default, the environment overrides it,
+// and a garbage value is an error rather than a silent disable. The
+// refuses-below-the-floor rule lives in main, next to the flag wiring.
+func TestResolveSnapshotAutoRefresh(t *testing.T) {
+	tests := []struct {
+		name    string
+		flag    time.Duration
+		env     string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "flag passes through", flag: 60 * time.Second, want: 60 * time.Second},
+		{name: "disabled by default", want: 0},
+		{name: "env overrides the flag", flag: 60 * time.Second, env: "120s", want: 120 * time.Second},
+		{name: "env disables", flag: 60 * time.Second, env: "0s", want: 0},
+		{name: "garbage env is an error", env: "soon", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PADAMELON_SNAPSHOT_AUTO_REFRESH", tc.env)
+			got, err := resolveSnapshotAutoRefresh(tc.flag)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err == nil && got != tc.want {
+				t.Errorf("resolveSnapshotAutoRefresh = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
 
 // TestResolveTokenPrecedence pins the resolution order: flag, then
 // $PADAMELON_TOKEN, then the file named by $PADAMELON_TOKEN_FILE.
@@ -221,128 +247,5 @@ func TestResolveTruenasHostAndUser(t *testing.T) {
 	t.Setenv("TRUENAS_USER", "")
 	if got := resolveTruenasUser(""); got != "pademelon" {
 		t.Errorf("user default = %q, want pademelon", got)
-	}
-}
-
-// fakeLister is the middlewareSource surface the gather needs, canned.
-type fakeLister struct {
-	st    truenas.Status
-	lists map[string][]truenas.Snapshot
-	err   error
-}
-
-func (f *fakeLister) Status() truenas.Status { return f.st }
-func (f *fakeLister) Snapshots(_ context.Context, dataset string) ([]truenas.Snapshot, error) {
-	if f.err != nil {
-		return nil, f.err
-	}
-	return f.lists[dataset], nil
-}
-
-// TestGatherSnapshots covers the pour: per-VM dataset mapping (zvol in,
-// file-backed out), newest-first sort, and the middleware status block.
-func TestGatherSnapshots(t *testing.T) {
-	fl := &fakeLister{
-		st: truenas.Status{Connected: true, Version: "TrueNAS-25.10.5"},
-		lists: map[string][]truenas.Snapshot{
-			"nvme/vms/alpine_test-bxuwle": {
-				{ID: "d@old", Dataset: "nvme/vms/alpine_test-bxuwle", Name: "old", Created: 100},
-				{ID: "d@new", Dataset: "nvme/vms/alpine_test-bxuwle", Name: "new", Created: 200},
-			},
-		},
-	}
-	snap := model.Snapshot{VMs: []model.VM{{
-		Domain: "14_alpine_test",
-		Disks: []model.Disk{
-			{Dev: "vda", Source: "/dev/zvol/nvme/vms/alpine_test-bxuwle"},
-			{Dev: "vdb", Source: "/mnt/pool/disks/file.qcow2"}, // not a zvol: skipped
-		},
-	}}}
-
-	gatherTruenasSnapshots(context.Background(), fl, &snap, model.Snapshot{}, slog.Default())
-
-	vm := snap.VMs[0]
-	if len(vm.Snapshots) != 2 {
-		t.Fatalf("gathered %d snapshots, want 2 (the file-backed disk must be skipped)", len(vm.Snapshots))
-	}
-	if vm.Snapshots[0].Name != "new" || vm.Snapshots[1].Name != "old" {
-		t.Errorf("snapshots not newest-first: %s then %s", vm.Snapshots[0].Name, vm.Snapshots[1].Name)
-	}
-	if snap.Truenas == nil || !snap.Truenas.Connected || snap.Truenas.Version != "TrueNAS-25.10.5" {
-		t.Errorf("truenas gather block = %+v", snap.Truenas)
-	}
-}
-
-// TestGatherCarriesOverOnFailure keeps a middleware hiccup from reading
-// as "your snapshots vanished": when a round comes up empty for a VM that
-// had a list, the previous poll's list rides along and the error says why.
-func TestGatherCarriesOverOnFailure(t *testing.T) {
-	fl := &fakeLister{st: truenas.Status{Connected: false}, err: errors.New("middleware not connected")}
-	snap := model.Snapshot{VMs: []model.VM{{
-		Domain: "14_alpine_test",
-		Disks:  []model.Disk{{Dev: "vda", Source: "/dev/zvol/nvme/vms/alpine_test-bxuwle"}},
-	}}}
-	prev := model.Snapshot{VMs: []model.VM{{
-		Domain:    "14_alpine_test",
-		Snapshots: []model.ZfsSnapshot{{ID: "d@yesterday", Created: 50}},
-	}}}
-
-	gatherTruenasSnapshots(context.Background(), fl, &snap, prev, slog.Default())
-
-	if len(snap.VMs[0].Snapshots) != 1 || snap.VMs[0].Snapshots[0].ID != "d@yesterday" {
-		t.Errorf("carry-over failed: %+v", snap.VMs[0].Snapshots)
-	}
-	if snap.Truenas.Error == "" {
-		t.Error("the gather error should be recorded, not swallowed")
-	}
-}
-
-// TestGatherBudgetCutsTheRoundOff: a gather that would outlive its
-// context stops and reports, instead of stretching one poll across
-// minutes of unreachable middleware.
-func TestGatherBudgetCutsTheRoundOff(t *testing.T) {
-	slow := &slowLister{delay: 100 * time.Millisecond}
-	snap := model.Snapshot{VMs: []model.VM{{
-		Domain: "14_alpine_test",
-		Disks:  []model.Disk{{Dev: "vda", Source: "/dev/zvol/nvme/vms/x"}},
-	}}}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-
-	gatherTruenasSnapshots(ctx, slow, &snap, model.Snapshot{}, slog.Default())
-	if snap.Truenas == nil || snap.Truenas.Error == "" {
-		t.Error("the budget overrun should be recorded in the gather error")
-	}
-}
-
-// slowLister sleeps past any short budget, simulating a stuck middleware.
-type slowLister struct{ delay time.Duration }
-
-func (s *slowLister) Status() truenas.Status { return truenas.Status{Connected: true} }
-func (s *slowLister) Snapshots(ctx context.Context, _ string) ([]truenas.Snapshot, error) {
-	select {
-	case <-time.After(s.delay):
-		return nil, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-}
-
-// TestGatherSurvivesTypedNilClient is the regression test for the crash
-// in production on 2026-09-07: a nil *truenas.Client inside the
-// middlewareSource interface is not a nil interface, and the gather must
-// read that as "integration off" — a healthy poll followed by a SIGSEGV
-// is exactly what a dashboard must never do.
-func TestGatherSurvivesTypedNilClient(t *testing.T) {
-	var client *truenas.Client // nil pointer, non-nil interface once wrapped
-	snap := model.Snapshot{VMs: []model.VM{{
-		Domain: "14_alpine_test",
-		Disks:  []model.Disk{{Dev: "vda", Source: "/dev/zvol/nvme/vms/x"}},
-	}}}
-
-	gatherTruenasSnapshots(context.Background(), client, &snap, model.Snapshot{}, slog.Default())
-
-	if snap.Truenas != nil {
-		t.Errorf("gather with a dead client must leave the middleware block off, got %+v", snap.Truenas)
 	}
 }

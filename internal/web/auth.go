@@ -192,11 +192,15 @@ func (s *Server) handleCapabilities(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(map[string]bool{
+	_ = enc.Encode(map[string]any{
 		"actions":      s.actions != nil,
 		"authRequired": s.auth.token != "",
 		"exec":         false, // permanently false for now; see §4
 		"truenas":      s.truenas != nil,
+		// How often an open panel refetches its snapshot list, in ms.
+		// 0 means the timer is off: panels fetch on open and on the
+		// refresh button only.
+		"snapshotAutoRefreshMs": s.snapRF.Milliseconds(),
 	})
 }
 

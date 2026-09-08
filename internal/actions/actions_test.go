@@ -562,20 +562,44 @@ func TestSnapshotNameFolding(t *testing.T) {
 	}
 }
 
-// restoreTestVM carries a disk with its zvol and a cached snapshot list —
-// the id guard validates against this.
+// restoreTestVM carries a disk with its zvol; the id guard validates
+// against the middleware's live answer, faked here.
 func restoreTestVM(state string) model.VM {
 	return model.VM{
 		Domain: "14_alpine_test", Name: "alpine_test", State: state,
 		Running: state == "running", Agent: model.AgentOK,
 		Disks: []model.Disk{{Dev: "vda", Source: "/dev/zvol/nvme/vms/alpine_test-bxuwle"}},
-		Snapshots: []model.ZfsSnapshot{
-			{ID: "nvme/vms/alpine_test-bxuwle@pademelon-alpine_test-2026-09-07_15-00", Created: 100},
-		},
 	}
 }
 
+// fakeGuard is the SnapshotGuard fake: it knows exactly the "domain|id"
+// pairs in known, and can be told to fail the check (the middleware-down
+// case, which must refuse the submission).
+type fakeGuard struct {
+	known map[string]bool
+	err   error
+}
+
+func guardWith(domain string, ids ...string) *fakeGuard {
+	g := &fakeGuard{known: map[string]bool{}}
+	for _, id := range ids {
+		g.known[domain+"|"+id] = true
+	}
+	return g
+}
+
+func (g *fakeGuard) ValidateKnown(_ context.Context, domain, id string) (bool, error) {
+	if g.err != nil {
+		return false, g.err
+	}
+	return g.known[domain+"|"+id], nil
+}
+
 func newRestoreStore(doms *fakeDomains, mw *fakeMiddleware, state string) *Store {
+	return newRestoreStoreGuarded(doms, mw, state, guardWith("14_alpine_test", testSnapID))
+}
+
+func newRestoreStoreGuarded(doms *fakeDomains, mw *fakeMiddleware, state string, guard *fakeGuard) *Store {
 	return New(Config{
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Snapshot: snapWith(restoreTestVM(state)),
@@ -583,6 +607,7 @@ func newRestoreStore(doms *fakeDomains, mw *fakeMiddleware, state string) *Store
 		Nudge:    make(chan struct{}, 8),
 		Timeout:  2 * time.Second,
 		Truenas:  mw,
+		Guard:    guard,
 	})
 }
 
@@ -595,7 +620,7 @@ func TestRestoreStagedRunningFullCycle(t *testing.T) {
 	mw := &fakeMiddleware{}
 	s := newRestoreStore(doms, mw, "running")
 
-	job, err := s.SubmitRestore("14_alpine_test", RestoreOpts{
+	job, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{
 		SnapshotID: testSnapID, Mode: ModeStaged, StartAfter: true, Ack: true,
 	})
 	if err != nil {
@@ -633,7 +658,7 @@ func TestRestoreStagedStoppedNoShutdown(t *testing.T) {
 	mw := &fakeMiddleware{}
 	s := newRestoreStore(doms, mw, "stopped")
 
-	job, err := s.SubmitRestore("14_alpine_test", RestoreOpts{
+	job, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{
 		SnapshotID: testSnapID, Mode: ModeStaged, StartAfter: false, Ack: false,
 	})
 	if err != nil {
@@ -662,7 +687,7 @@ func TestRestoreRollbackFailureLeavesGuestStopped(t *testing.T) {
 	mw := &fakeMiddleware{rollbackErr: errors.New("dataset busy")}
 	s := newRestoreStore(doms, mw, "running")
 
-	job, err := s.SubmitRestore("14_alpine_test", RestoreOpts{
+	job, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{
 		SnapshotID: testSnapID, Mode: ModeStaged, StartAfter: true, Ack: true,
 	})
 	if err != nil {
@@ -685,7 +710,7 @@ func TestRestoreRollbackFailureLeavesGuestStopped(t *testing.T) {
 func TestRestoreDirectRunningNeedsAck(t *testing.T) {
 	s := newRestoreStore(&fakeDomains{}, &fakeMiddleware{}, "running")
 
-	if _, err := s.SubmitRestore("14_alpine_test", RestoreOpts{
+	if _, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{
 		SnapshotID: testSnapID, Mode: ModeDirect, Ack: false,
 	}); !errors.Is(err, ErrInvalidState) {
 		t.Errorf("direct without ack = %v, want ErrInvalidState", err)
@@ -694,7 +719,7 @@ func TestRestoreDirectRunningNeedsAck(t *testing.T) {
 		t.Errorf("a refused restore must not register a job: %+v", jobs)
 	}
 	// With ack it goes through.
-	if _, err := s.SubmitRestore("14_alpine_test", RestoreOpts{
+	if _, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{
 		SnapshotID: testSnapID, Mode: ModeDirect, Ack: true,
 	}); err != nil {
 		t.Errorf("direct with ack refused: %v", err)
@@ -707,7 +732,7 @@ func TestDeleteJobRecordsTheVerb(t *testing.T) {
 	mw := &fakeMiddleware{}
 	s := newRestoreStore(&fakeDomains{}, mw, "running")
 
-	job, err := s.SubmitDelete("14_alpine_test", testSnapID)
+	job, err := s.SubmitDelete(context.Background(), "14_alpine_test", testSnapID)
 	if err != nil {
 		t.Fatalf("submit delete: %v", err)
 	}
@@ -719,7 +744,7 @@ func TestDeleteJobRecordsTheVerb(t *testing.T) {
 	// Already gone: success with a different story, not a failure.
 	gone := &fakeMiddleware{deleteGone: true}
 	s2 := newRestoreStore(&fakeDomains{}, gone, "running")
-	job2, err := s2.SubmitDelete("14_alpine_test", testSnapID)
+	job2, err := s2.SubmitDelete(context.Background(), "14_alpine_test", testSnapID)
 	if err != nil {
 		t.Fatalf("submit delete: %v", err)
 	}
@@ -729,19 +754,57 @@ func TestDeleteJobRecordsTheVerb(t *testing.T) {
 	}
 }
 
-// TestSnapshotIdGuard: a snapshot id that is not in the VM's cached list
-// is unreachable — restore and delete both refuse it.
+// TestSnapshotIdGuard: a snapshot id the middleware does not know for
+// this VM is unreachable — restore and delete both refuse it.
 func TestSnapshotIdGuard(t *testing.T) {
 	s := newRestoreStore(&fakeDomains{}, &fakeMiddleware{}, "running")
 
-	if _, err := s.SubmitRestore("14_alpine_test", RestoreOpts{SnapshotID: "nvme/vms/x@ghost", Mode: ModeStaged}); !errors.Is(err, ErrUnknownSnapshot) {
+	if _, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{SnapshotID: "nvme/vms/x@ghost", Mode: ModeStaged}); !errors.Is(err, ErrUnknownSnapshot) {
 		t.Errorf("restore unknown snapshot = %v", err)
 	}
-	if _, err := s.SubmitDelete("14_alpine_test", "nvme/vms/x@ghost"); !errors.Is(err, ErrUnknownSnapshot) {
+	if _, err := s.SubmitDelete(context.Background(), "14_alpine_test", "nvme/vms/x@ghost"); !errors.Is(err, ErrUnknownSnapshot) {
 		t.Errorf("delete unknown snapshot = %v", err)
 	}
 	// An unknown domain reads as unknown snapshot too — same 404 either way.
-	if _, err := s.SubmitDelete("99_ghost", testSnapID); err == nil {
+	if _, err := s.SubmitDelete(context.Background(), "99_ghost", testSnapID); err == nil {
 		t.Error("delete on unknown domain should refuse")
+	}
+}
+
+// TestSnapshotGuardFailureRefuses: when the guard cannot get a live
+// middleware answer, the submission is refused — fail closed, and with a
+// distinct error the web layer maps to 503, not to "no such snapshot". A
+// stale id must never reach a rollback because the check could not run.
+func TestSnapshotGuardFailureRefuses(t *testing.T) {
+	g := &fakeGuard{err: errors.New("middleware not connected")}
+	s := newRestoreStoreGuarded(&fakeDomains{}, &fakeMiddleware{}, "running", g)
+
+	if _, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{
+		SnapshotID: testSnapID, Mode: ModeStaged,
+	}); !errors.Is(err, ErrGuardUnavailable) {
+		t.Errorf("restore with a failed guard = %v, want ErrGuardUnavailable", err)
+	}
+	if _, err := s.SubmitDelete(context.Background(), "14_alpine_test", testSnapID); !errors.Is(err, ErrGuardUnavailable) {
+		t.Errorf("delete with a failed guard = %v, want ErrGuardUnavailable", err)
+	}
+	if jobs := s.List(); len(jobs) != 0 {
+		t.Errorf("a refused submit must not register a job: %+v", jobs)
+	}
+}
+
+// TestSnapshotGuardWithoutGuardConfigured: a store built without a guard
+// cannot verify ids, so restore and delete refuse rather than skip the
+// check.
+func TestSnapshotGuardWithoutGuardConfigured(t *testing.T) {
+	s := New(Config{
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Snapshot: snapWith(restoreTestVM("running")),
+		Conn:     &fakeConn{doms: &fakeDomains{}},
+		Nudge:    make(chan struct{}, 8),
+		Timeout:  2 * time.Second,
+		Truenas:  &fakeMiddleware{},
+	})
+	if _, err := s.SubmitDelete(context.Background(), "14_alpine_test", testSnapID); !errors.Is(err, ErrGuardUnavailable) {
+		t.Errorf("delete without a guard = %v, want ErrGuardUnavailable", err)
 	}
 }

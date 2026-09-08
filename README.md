@@ -33,6 +33,8 @@ Windows and Linux (tested Windows Server 2022 & Ubuntu Server 24.04.4 LTS)
 - Agent version & clock drift per VM
 - VM raw XML viewer
 - Manual refresh button
+- ZFS snapshot list per VM, fetched on demand from the TrueNAS middleware (when a panel opens or on refresh) with the optional `-snapshot-auto-refresh` timer for open panels — needs the middleware integration below
+- Snapshot now, restore and delete per snapshot — behind `-allow-actions` **and** the middleware integration
 - VM power actions — start, shutdown, reboot, force off, pause, resume, and a bulk "shut down all" — behind `-allow-actions` **and** a token, both required; see the auth section below
 - Colour themes — nine built in, pick one in the page header or set the server default with `-theme`
 - Optional token auth — see "Optional auth" below

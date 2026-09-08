@@ -153,13 +153,31 @@ const (
 	// every connection immediately cannot drive a rapid retry loop.
 	MiddlewareRetryFloor = 5 * time.Second
 
-	// SnapshotGatherBudget bounds one poll's whole snapshot-gathering
-	// round across every VM and dataset. Each request is already capped
-	// by MiddlewareTimeout, but ten datasets at ten seconds each would
-	// still stretch one poll to two minutes; the budget cuts the gather
-	// off, and the next poll (or the next nudge) finishes the job. Must
-	// stay well under DefaultPollInterval.
-	SnapshotGatherBudget = 15 * time.Second
+	// SnapshotFetchBudget bounds one VM's whole snapshot fetch: every
+	// per-dataset query the middleware answers for that VM, sequential,
+	// each already capped by MiddlewareTimeout. Fetches are on demand
+	// (panel open, refresh button), one VM at a time; the budget stops a
+	// stuck middleware from holding the slot forever.
+	SnapshotFetchBudget = 30 * time.Second
+
+	// SnapshotRefetchFloor is the minimum gap between two middleware
+	// fetches for the same VM. A force request (panel open, refresh
+	// button) inside the floor serves the cached copy, so rapid
+	// open/close cycles and multiple tabs cannot hammer the middleware
+	// with its expensive per-dataset queries.
+	SnapshotRefetchFloor = 5 * time.Second
+
+	// SnapshotConnectGrace is how long a fetch waits for the middleware
+	// connection to come back after poking it with Wake. A fresh dial
+	// takes well under a second; the grace turns "open the panel right
+	// after a dropout" from one failed fetch into one short wait.
+	SnapshotConnectGrace = 3 * time.Second
+
+	// SnapshotAutoRefreshFloor is the smallest interval the
+	// -snapshot-auto-refresh flag accepts. The flag refetches open
+	// panels only, but a value this low would still drive the
+	// middleware's expensive queries continuously; below it, refuse.
+	SnapshotAutoRefreshFloor = 30 * time.Second
 
 	// SnapshotActionTimeout is the hard bound for one snapshot job: the
 	// freeze, one middleware create per disk dataset, and the thaw. The

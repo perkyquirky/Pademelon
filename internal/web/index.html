@@ -1116,23 +1116,27 @@ function networkHtml(vm) {
 
 // --- snapshots (zvol, via the TrueNAS middleware) ---------------------------
 
-// The list is fetched per VM on demand — /api/vms deliberately doesn't
-// carry it (a dataset with years of auto-* snapshots would bloat the main
-// fetch). Held here with a fetch time; an open panel refreshes when its
-// copy is older than one poll interval.
+// The list is fetched on demand — /api/vms deliberately doesn't carry it
+// (a dataset with years of auto-* snapshots would bloat the main fetch),
+// and the server only asks the middleware when a panel opens, when the
+// refresh button is pressed, or when the auto-refresh timer is on. While
+// the server is fetching, the reply says fetching:true and the tick keeps
+// polling until the data lands.
 const snapStore = new Map(); // domain -> { fetchedAt, data }
-const SNAP_STALE_MS = 30000;
 
 function snapshotsInner(domain, data) {
   if (!capsTruenas) return `<div class="note">middleware integration not configured</div>`;
   if (!data) return `<div class="note">loading…</div>`;
-  const g = data.truenas;
   const bits = [];
-  if (g && g.error) bits.push(`<div class="note warn">middleware: ${esc(g.error)}</div>`);
-  else if (g && !g.connected) bits.push(`<div class="note">middleware offline — list may be stale</div>`);
   const list = data.snapshots || [];
+  if (data.error) {
+    bits.push(`<div class="note warn">middleware: ${esc(data.error)}${data.stale ? " — list may be stale" : ""}</div>`);
+  } else if (data.truenas && !data.truenas.connected) {
+    bits.push(`<div class="note">middleware offline — list may be stale</div>`);
+  }
   if (!list.length) {
-    bits.push(`<div class="note">no snapshots on this VM's disks${g && g.connected ? "" : " (list may be stale)"}</div>`);
+    if (data.fetching) bits.push(`<div class="note">asking the middleware…</div>`);
+    else if (!data.error && data.truenas && data.truenas.connected) bits.push(`<div class="note">no snapshots on this VM's disks</div>`);
     return bits.join("");
   }
   const MAX = 50; // filters come later, once real auto-* volume is known
@@ -1157,6 +1161,7 @@ function snapshotsInner(domain, data) {
       `<span class="sub">${age} ago${size}</span>${rowActions}</div>`);
   }
   if (list.length > MAX) bits.push(`<div class="note">and ${list.length - MAX} more…</div>`);
+  if (data.fetching) bits.push(`<div class="note">refreshing…</div>`);
   return bits.join("");
 }
 
@@ -1170,13 +1175,8 @@ function paintSnapshots(domain) {
 async function refreshSnapshots(domain, force) {
   const entry = store.get(domain);
   if (!entry || !entry.open || !capsTruenas) return;
-  const held = snapStore.get(domain);
-  if (!force && held && Date.now() - held.fetchedAt < SNAP_STALE_MS) {
-    paintSnapshots(domain);
-    return;
-  }
   try {
-    const res = await fetch(`/api/vm/${encodeURIComponent(domain)}/snapshots`, { cache: "no-store" });
+    const res = await fetch(`/api/vm/${encodeURIComponent(domain)}/snapshots${force ? "?force=1" : ""}`, { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
     snapStore.set(domain, { fetchedAt: Date.now(), data });
@@ -1218,6 +1218,7 @@ function detailHtml(vm, open) {
 // button.
 let capsActions = false;
 let capsTruenas = false;
+let capsSnapAutoRefresh = 0; // open-panel snapshot timer, ms; 0 = off
 let truenasStatus = null; // last /api/truenas reply; null until fetched
 
 function powerMenuHtml(vm) {
@@ -1446,10 +1447,19 @@ async function tick() {
 
     renderVMs(vms);
 
-    // Open panels keep their snapshot lists fresh: repaint from the store,
-    // refetch only when the copy is older than one poll interval.
+    // Open panels: keep polling while the server is mid-fetch, and when
+    // the auto-refresh timer is on, refetch a panel whose copy has aged
+    // past it. With the timer off, an open panel only fetches on open
+    // and on the refresh button — no background load.
     for (const [domain, entry] of store) {
-      if (entry.open) refreshSnapshots(domain, false);
+      if (!entry.open) continue;
+      const held = snapStore.get(domain);
+      const data = held && held.data;
+      if (data && data.fetching) {
+        refreshSnapshots(domain, false);
+      } else if (capsSnapAutoRefresh > 0 && (!data || Date.now() - held.fetchedAt >= capsSnapAutoRefresh)) {
+        refreshSnapshots(domain, true);
+      }
     }
 
     if (Date.now() >= statusHoldUntil && !selectionTouches(statusEl)) {
@@ -1535,6 +1545,9 @@ async function checkCapabilities() {
     const caps = await res.json();
     capsActions = !!caps.actions;
     capsTruenas = !!caps.truenas;
+    // The open-panel snapshot timer, in ms. 0 means off: panels fetch on
+    // open and on the refresh button only.
+    capsSnapAutoRefresh = Math.max(0, Number(caps.snapshotAutoRefreshMs) || 0);
     if (capsActions) btnShutdownAll.hidden = false;
     renderVMs(latestVMs); // redraw the panels with or without power menus
     // A previous login may still be valid via the session cookie.
@@ -1597,7 +1610,7 @@ document.getElementById("rows").addEventListener("click", (e) => {
   entry.open = !entry.open;
   entry.el.classList.toggle("open", entry.open);
   entry.detailEl.hidden = !entry.open;
-  if (entry.open) refreshSnapshots(cell.dataset.domain, false);
+  if (entry.open) refreshSnapshots(cell.dataset.domain, true);
 });
 
 // --- raw xml viewer --------------------------------------------------------
@@ -1642,6 +1655,13 @@ btnRefresh.addEventListener("click", async () => {
   btnRefresh.disabled = true;
   try {
     await fetch("/api/refresh", { method: "POST", cache: "no-store" });
+    // The refresh button also pulls the middleware snapshot lists — the
+    // server sweeps every VM, one at a time. Open panels discover the
+    // sweep and follow it via their ticks.
+    fetch("/api/refresh-snapshots", { method: "POST", cache: "no-store" }).catch(() => {});
+    for (const [domain, entry] of store) {
+      if (entry.open) refreshSnapshots(domain, false);
+    }
     const statusEl = document.getElementById("status");
     if (!selectionTouches(statusEl)) {
       statusEl.textContent = "refresh requested — fresh data in a moment";
@@ -1733,7 +1753,9 @@ async function confirmDelete(domain, snap) {
   try {
     await apiSubmit(`/api/vm/${encodeURIComponent(domain)}/snapshot/${encodeURIComponent(snap.id)}`, { method: "DELETE" });
     toast("delete requested");
-    setTimeout(() => refreshSnapshots(domain, true), 4000);
+    // Refetch past the server's refetch floor, so the list shows the
+    // deletion instead of the pre-delete copy.
+    setTimeout(() => refreshSnapshots(domain, true), 6000);
   } catch (err) {
     toast(`delete: ${err.message}`);
   }

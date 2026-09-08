@@ -118,10 +118,18 @@ services:
 # Pademelon makes are ordinary ZFS snapshots, and they appear in the
 # TrueNAS UI too.
 #
+# Snapshot lists are fetched on demand — when a VM panel opens, when the
+# refresh button is pressed, and (optionally) on a timer for open panels
+# only:
+#
 #    environment:
 #      - TRUENAS_HOST=192.168.1.100
 #      # Visible in `docker inspect` — the file form keeps it out:
 #      - TRUENAS_API_KEY_FILE=/run/secrets/truenas_api_key
+#      # Optional: how often an OPEN panel refetches its snapshot list,
+#      # e.g. 60s. Default is 0s (off): fetch on panel open and refresh
+#      # button only. Values below 30s are refused.
+#      # - PADAMELON_SNAPSHOT_AUTO_REFRESH=60s
 #    secrets:
 #      - truenas_api_key
 #

@@ -2,11 +2,13 @@ package web
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"pademelon/internal/model"
+	"pademelon/internal/snapshots"
 	"pademelon/internal/truenas"
 )
 
@@ -72,20 +74,21 @@ func TestTruenasStatusRoute(t *testing.T) {
 }
 
 func TestVMSnapshotsRoute(t *testing.T) {
-	// The list comes from the cache, never the middleware; an unknown
-	// name gets the same 404 as the XML route.
+	// The list comes from the snapshot service; the route only glues it
+	// to HTTP. An unknown name gets the same 404 as the XML route.
 	cache := model.NewCache()
 	cache.Set(model.Snapshot{
-		Polled:  time.Unix(1788746207, 0),
-		Truenas: &model.TruenasGather{Connected: true, Version: "TrueNAS-25.10.5"},
-		VMs: []model.VM{{
-			Domain: "14_alpine_test",
-			Snapshots: []model.ZfsSnapshot{
-				{ID: "nvme/vms/x@pademelon-x-2026-09-07_13-08", Name: "pademelon-x-2026-09-07_13-08", Created: 1788749817},
-			},
-		}},
+		Polled: time.Unix(1788746207, 0),
+		VMs:    []model.VM{{Domain: "14_alpine_test"}},
 	})
-	s := New(Config{Cache: cache, Log: discardLogger(), Theme: DefaultTheme})
+	snaps := &fakeSnaps{out: snapshots.State{
+		Domain: "14_alpine_test",
+		Status: truenas.Status{Connected: true, Version: "TrueNAS-25.10.5"},
+		Snapshots: []model.ZfsSnapshot{
+			{ID: "nvme/vms/x@pademelon-x-2026-09-07_13-08", Name: "pademelon-x-2026-09-07_13-08", Created: 1788749817},
+		},
+	}}
+	s := New(Config{Cache: cache, Log: discardLogger(), Theme: DefaultTheme, Snaps: snaps})
 
 	code, _, body := doGetBody(s, "/api/vm/14_alpine_test/snapshots", nil)
 	if code != http.StatusOK {
@@ -96,18 +99,74 @@ func TestVMSnapshotsRoute(t *testing.T) {
 			t.Errorf("snapshots body missing %s, got: %s", want, body)
 		}
 	}
+	if snaps.requests != 1 || snaps.force {
+		t.Errorf("service should see one non-forced request, got %d (force %v)", snaps.requests, snaps.force)
+	}
+
+	// A force request reaches the service as one.
+	code, _, _ = doGetBody(s, "/api/vm/14_alpine_test/snapshots?force=1", nil)
+	if code != http.StatusOK || !snaps.force || snaps.requests != 2 {
+		t.Errorf("force request = %d, saw %d requests (last force %v)", code, snaps.requests, snaps.force)
+	}
 
 	code, _, _ = doGetBody(s, "/api/vm/99_ghost/snapshots", nil)
 	if code != http.StatusNotFound {
-		t.Errorf("unknown domain = %d, want 404", code)
+		t.Errorf("unknown domain = %d, want 404 (and the service must not see it)", code)
+	}
+	if snaps.requests != 2 {
+		t.Errorf("unknown domain reached the service %d times, want 0 more", snaps.requests-2)
 	}
 
 	// Integration off: the route still answers, with truenas null and an
 	// empty list — honest "off", not a 404.
-	off := New(Config{Cache: model.NewCache(), Log: discardLogger(), Theme: DefaultTheme})
-	off.cache.Set(model.Snapshot{VMs: []model.VM{{Domain: "14_alpine_test"}}})
+	off := New(Config{Cache: cache, Log: discardLogger(), Theme: DefaultTheme})
 	code, _, body = doGetBody(off, "/api/vm/14_alpine_test/snapshots", nil)
 	if code != http.StatusOK || !strings.Contains(body, `"truenas": null`) {
 		t.Errorf("integration-off snapshots = %d %s, want 200 with truenas null", code, body)
 	}
+}
+
+func TestRefreshSnapshotsRoute(t *testing.T) {
+	cache := model.NewCache()
+	cache.Set(model.Snapshot{VMs: []model.VM{{Domain: "14_alpine_test"}}})
+	snaps := &fakeSnaps{}
+	s := New(Config{Cache: cache, Log: discardLogger(), Theme: DefaultTheme, Snaps: snaps})
+
+	rec := httptest.NewRequest("POST", "/api/refresh-snapshots", nil)
+	outer := httptest.NewRecorder()
+	s.Handler().ServeHTTP(outer, rec)
+	if outer.Code != http.StatusOK || !strings.Contains(outer.Body.String(), "requested 3") {
+		t.Errorf("refresh-snapshots = %d %s, want 200 counting the sweep", outer.Code, outer.Body.String())
+	}
+	if snaps.sweeps != 1 {
+		t.Errorf("RefreshAll called %d times, want 1", snaps.sweeps)
+	}
+
+	// Integration off: 503, the same honesty as the snapshot verb.
+	off := New(Config{Cache: cache, Log: discardLogger(), Theme: DefaultTheme})
+	outer = httptest.NewRecorder()
+	off.Handler().ServeHTTP(outer, rec)
+	if outer.Code != http.StatusServiceUnavailable {
+		t.Errorf("refresh-snapshots with integration off = %d, want 503", outer.Code)
+	}
+}
+
+// fakeSnaps is the SnapshotProvider surface, canned.
+type fakeSnaps struct {
+	out      snapshots.State
+	domain   string
+	force    bool
+	requests int
+	sweeps   int
+}
+
+func (f *fakeSnaps) Request(domain string, force bool) snapshots.State {
+	f.requests++
+	f.domain, f.force = domain, force
+	return f.out
+}
+
+func (f *fakeSnaps) RefreshAll() int {
+	f.sweeps++
+	return 3
 }

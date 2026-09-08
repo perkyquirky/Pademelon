@@ -8,12 +8,21 @@
 // names never come from a URL" rule still holds where it matters. POST
 // /api/refresh asks the poll loop for an early poll through a debounced
 // channel; the loop, not the request, decides when libvirt is polled.
+//
+// The middleware snapshot list is the deliberate exception: it is far too
+// expensive to gather on a timer, so /api/vm/{name}/snapshots?force=1
+// starts a on-demand fetch (internal/snapshots) and POST
+// /api/refresh-snapshots sweeps every VM, one at a time. The handler
+// itself still never blocks on the middleware — it returns what is held
+// and says "fetching" until the fetch lands.
+//
 // A private tier (see auth.go) sits behind a static token; it is only
 // registered when a token is configured.
 package web
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"encoding/json"
 	"log/slog"
@@ -23,6 +32,7 @@ import (
 
 	"pademelon/internal/actions"
 	"pademelon/internal/model"
+	"pademelon/internal/snapshots"
 	"pademelon/internal/truenas"
 )
 
@@ -44,16 +54,19 @@ type Server struct {
 	nudge   chan<- struct{}
 	actions ActionSubmitter
 	truenas TruenasStatusProvider
+	snaps   SnapshotProvider
+	snapRF  time.Duration // the -snapshot-auto-refresh interval, 0 = off
 }
 
 // ActionSubmitter is the slice of the actions store the web layer uses.
-// An interface, so route handlers test without a hypervisor.
+// An interface, so route handlers test without a hypervisor. The context
+// bounds the restore/delete id check, never the job.
 type ActionSubmitter interface {
 	Submit(domain string, action actions.Action) (*actions.Job, error)
 	List() []actions.Job
 	ShutdownAll() (planned []string, skipped []string)
-	SubmitRestore(domain string, opts actions.RestoreOpts) (*actions.Job, error)
-	SubmitDelete(domain, snapshotID string) (*actions.Job, error)
+	SubmitRestore(ctx context.Context, domain string, opts actions.RestoreOpts) (*actions.Job, error)
+	SubmitDelete(ctx context.Context, domain, snapshotID string) (*actions.Job, error)
 }
 
 // TruenasStatusProvider is the slice of the middleware client the web
@@ -63,10 +76,22 @@ type TruenasStatusProvider interface {
 	Status() truenas.Status
 }
 
+// SnapshotProvider is the slice of the snapshot service the web layer
+// uses: on-demand requests for one VM's list, and the refresh-everything
+// sweep. Nil means the middleware integration is off. This is the one
+// deliberate exception to "handlers never trigger work": a snapshot
+// request starts a middleware fetch, because the list is far too
+// expensive to gather on a timer (README2, "TrueNAS middleware").
+type SnapshotProvider interface {
+	Request(domain string, force bool) snapshots.State
+	RefreshAll() int
+}
+
 // Config is everything New needs. Zero-value fields have safe defaults:
 // an empty theme falls back to the default, an empty token disables auth,
-// a nil Actions disables every action route, and a nil Truenas means the
-// middleware integration is off.
+// a nil Actions disables every action route, a nil Truenas means the
+// middleware integration is off, and a zero SnapshotAutoRefresh disables
+// the open-panel auto refresh.
 type Config struct {
 	Cache   *model.Cache
 	Log     *slog.Logger
@@ -75,6 +100,13 @@ type Config struct {
 	Nudge   chan<- struct{}
 	Actions ActionSubmitter
 	Truenas TruenasStatusProvider
+	Snaps   SnapshotProvider
+
+	// SnapshotAutoRefresh is how often an open panel refetches its
+	// snapshot list, advertised to the page via capabilities. Zero
+	// disables the timer; the panel still fetches on open and on the
+	// refresh button.
+	SnapshotAutoRefresh time.Duration
 }
 
 // New returns a Server reading from cache. The theme is the default
@@ -107,6 +139,11 @@ func New(cfg Config) *Server {
 			cfg.Truenas = nil
 		}
 	}
+	if cfg.Snaps != nil {
+		if v := reflect.ValueOf(cfg.Snaps); v.Kind() == reflect.Ptr && v.IsNil() {
+			cfg.Snaps = nil
+		}
+	}
 	return &Server{
 		cache:   cfg.Cache,
 		log:     cfg.Log,
@@ -115,6 +152,8 @@ func New(cfg Config) *Server {
 		nudge:   cfg.Nudge,
 		actions: cfg.Actions,
 		truenas: cfg.Truenas,
+		snaps:   cfg.Snaps,
+		snapRF:  cfg.SnapshotAutoRefresh,
 	}
 }
 
@@ -129,6 +168,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/capabilities", s.handleCapabilities)
 	mux.HandleFunc("GET /api/truenas", s.handleTruenasStatus)
 	mux.HandleFunc("GET /api/vm/{name}/snapshots", s.handleVMSnapshots)
+	mux.HandleFunc("POST /api/refresh-snapshots", s.handleRefreshSnapshots)
 	if s.actions != nil {
 		mux.Handle("POST /api/vm/{name}/{action}", s.requireToken(csrfGuard(http.HandlerFunc(s.handleSubmitAction))))
 		mux.Handle("POST /api/actions/shutdown-all", s.requireToken(csrfGuard(http.HandlerFunc(s.handleShutdownAll))))

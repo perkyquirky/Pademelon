@@ -139,8 +139,14 @@ var (
 	// against races between the page and a config change.
 	ErrMiddlewareOff = errors.New("middleware integration is off")
 
+	// ErrGuardUnavailable marks a restore or delete whose id could not
+	// be checked because the middleware was unreachable at submit time.
+	// The web layer maps it to 503 — "try again", not "no such
+	// snapshot"; the check fails closed either way.
+	ErrGuardUnavailable = errors.New("snapshot list could not be verified")
+
 	// ErrUnknownSnapshot marks a restore or delete whose snapshot id
-	// is not in the poller's last list for that VM — the same
+	// is not in the middleware's live list for that VM — the same
 	// blast-radius rule as the action routes: only what the dashboard
 	// shows is reachable.
 	ErrUnknownSnapshot = errors.New("unknown snapshot for this VM")
@@ -175,6 +181,15 @@ type MiddlewareClient interface {
 	DeleteSnapshot(ctx context.Context, dataset, name string) (bool, error)
 }
 
+// SnapshotGuard is the id check for restore and delete submissions: is
+// this snapshot one the middleware currently knows for this VM? The
+// snapshot service implements it with a live middleware answer, so the
+// blast-radius rule holds against reality instead of a possibly stale
+// poller cache.
+type SnapshotGuard interface {
+	ValidateKnown(ctx context.Context, domain, snapshotID string) (bool, error)
+}
+
 // Config is what the store needs from main.
 type Config struct {
 	Log           *slog.Logger
@@ -191,6 +206,7 @@ type Config struct {
 	SnapshotTimeout time.Duration
 
 	Truenas MiddlewareClient // TrueNAS middleware writes; nil keeps snapshot jobs refused
+	Guard   SnapshotGuard    // snapshot id check for restore/delete; required with Truenas
 	Now     func() time.Time // injectable clock for tests
 	NewID   func() string    // injectable id source for tests
 }
@@ -239,6 +255,9 @@ func New(cfg Config) *Store {
 	// (the web layer hit it in production once); treat it as off.
 	if v := reflect.ValueOf(cfg.Truenas); v.Kind() == reflect.Ptr && v.IsNil() {
 		cfg.Truenas = nil
+	}
+	if v := reflect.ValueOf(cfg.Guard); v.Kind() == reflect.Ptr && v.IsNil() {
+		cfg.Guard = nil
 	}
 	return &Store{cfg: cfg, jobs: map[string]*Job{}, frozen: map[string]time.Time{}}
 }
@@ -298,10 +317,14 @@ func (s *Store) register(domain string, action Action, build func() *Job) (*Job,
 	}
 	job := build()
 	s.jobs[job.ID] = job
+	// Clone under the lock: the runner goroutine below writes job fields
+	// under this same mutex, and a clone made after releasing it would
+	// read them mid-write (the race the -race build caught on 2026-09-08).
+	out := clone(job)
 	s.mu.Unlock()
 
 	go s.run(job)
-	return clone(job), nil
+	return out, nil
 }
 
 // Submit validates the request against the last snapshot, registers a job
@@ -345,19 +368,20 @@ func (s *Store) Submit(domain string, action Action) (*Job, error) {
 	})
 }
 
-// SubmitRestore queues a snapshot restore. Validation happens here, on
-// the last snapshot's list: the snapshot must belong to one of this VM's
-// disk datasets, a direct restore of a running VM needs the
-// acknowledgement, and the mode must be one of the two known paths. The
-// job itself re-checks nothing — the registry owns it from here.
-func (s *Store) SubmitRestore(domain string, opts RestoreOpts) (*Job, error) {
+// SubmitRestore queues a snapshot restore. Validation happens here, on a
+// live middleware answer (see validateSnapshot): the snapshot must belong
+// to one of this VM's disk datasets, a direct restore of a running VM
+// needs the acknowledgement, and the mode must be one of the two known
+// paths. The job itself re-checks nothing — the registry owns it from
+// here. The context bounds the validation wait, not the job.
+func (s *Store) SubmitRestore(ctx context.Context, domain string, opts RestoreOpts) (*Job, error) {
 	if s.cfg.Truenas == nil {
 		return nil, ErrMiddlewareOff
 	}
 	if opts.Mode != ModeStaged && opts.Mode != ModeDirect {
 		return nil, fmt.Errorf("%w: mode %q, want %q or %q", ErrBadRestore, opts.Mode, ModeStaged, ModeDirect)
 	}
-	if _, _, err := s.validateSnapshot(domain, opts.SnapshotID); err != nil {
+	if err := s.validateSnapshot(ctx, domain, opts.SnapshotID); err != nil {
 		return nil, err
 	}
 	if opts.Mode == ModeDirect {
@@ -383,12 +407,13 @@ func (s *Store) SubmitRestore(domain string, opts RestoreOpts) (*Job, error) {
 }
 
 // SubmitDelete queues a snapshot deletion. The id guard is the same as
-// the restore's: only snapshots the poller last reported are reachable.
-func (s *Store) SubmitDelete(domain, snapshotID string) (*Job, error) {
+// the restore's: only snapshots the middleware currently knows are
+// reachable. The context bounds the validation wait, not the job.
+func (s *Store) SubmitDelete(ctx context.Context, domain, snapshotID string) (*Job, error) {
 	if s.cfg.Truenas == nil {
 		return nil, ErrMiddlewareOff
 	}
-	if _, _, err := s.validateSnapshot(domain, snapshotID); err != nil {
+	if err := s.validateSnapshot(ctx, domain, snapshotID); err != nil {
 		return nil, err
 	}
 	return s.register(domain, ActionDelete, func() *Job {
@@ -403,23 +428,27 @@ func (s *Store) SubmitDelete(domain, snapshotID string) (*Job, error) {
 	})
 }
 
-// validateSnapshot checks the id guard: the snapshot must be in the last
-// snapshot's list for this VM. Returns the dataset and name parts.
-func (s *Store) validateSnapshot(domain, id string) (dataset, name string, err error) {
-	vm := s.lookupVM(s.cfg.Snapshot(), domain)
-	if vm == nil {
-		return "", "", fmt.Errorf("%w: %s not in the last snapshot", ErrUnknownDomain, domain)
+// validateSnapshot checks the id guard: the snapshot must be one the
+// middleware currently knows for this VM. The check runs at submit time
+// against the snapshot service — a clean held list answers instantly, a
+// missing or stale one costs a fresh middleware fetch — so a stale or
+// fabricated id is refused before a job exists. The wait is bounded by
+// ctx; the web layer hands in a bounded one.
+func (s *Store) validateSnapshot(ctx context.Context, domain, id string) error {
+	if s.cfg.Guard == nil {
+		return fmt.Errorf("%w: no snapshot guard is configured", ErrGuardUnavailable)
 	}
-	for _, sn := range vm.Snapshots {
-		if sn.ID == id {
-			ds, n, ok := strings.Cut(id, "@")
-			if !ok {
-				return "", "", fmt.Errorf("%w: malformed id %q", ErrUnknownSnapshot, id)
-			}
-			return ds, n, nil
-		}
+	ok, err := s.cfg.Guard.ValidateKnown(ctx, domain, id)
+	if err != nil {
+		return fmt.Errorf("%w: %s: %v", ErrGuardUnavailable, id, err)
 	}
-	return "", "", fmt.Errorf("%w: %s on %s", ErrUnknownSnapshot, id, domain)
+	if !ok {
+		return fmt.Errorf("%w: %s on %s", ErrUnknownSnapshot, id, domain)
+	}
+	if _, _, cut := strings.Cut(id, "@"); !cut {
+		return fmt.Errorf("%w: malformed id %q", ErrUnknownSnapshot, id)
+	}
+	return nil
 }
 
 // List returns running and finished jobs, oldest first.

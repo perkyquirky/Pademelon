@@ -15,8 +15,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -26,6 +24,7 @@ import (
 	"pademelon/internal/clocks"
 	"pademelon/internal/libvirtsrc"
 	"pademelon/internal/model"
+	"pademelon/internal/snapshots"
 	"pademelon/internal/truenas"
 	"pademelon/internal/web"
 )
@@ -48,6 +47,7 @@ func main() {
 		truenasUser  = flag.String("truenas-user", "pademelon", "service account that owns the middleware API key (default: $TRUENAS_USER)")
 		truenasKey   = flag.String("truenas-api-key", "", "middleware API key for the service account (default: $TRUENAS_API_KEY or $TRUENAS_API_KEY_FILE)")
 		truenasCA    = flag.String("truenas-ca-file", "", "CA bundle to verify the middleware certificate; empty skips verification (TrueNAS ships a self-signed cert)")
+		snapAutoRF   = flag.Duration("snapshot-auto-refresh", 0, "how often an open VM panel refetches its snapshot list, e.g. 60s; 0s disables (default: $PADAMELON_SNAPSHOT_AUTO_REFRESH)")
 		logLevel     = flag.String("log-level", "info", "debug, info, warn or error")
 		logFormat    = flag.String("log-format", "text", "text or json")
 		showVersion  = flag.Bool("version", false, "print version and exit")
@@ -113,6 +113,21 @@ func main() {
 		os.Exit(2)
 	}
 
+	// The snapshot auto-refresh interval follows the same flag-then-env
+	// shape. It only ever drives open panels, but a floor still applies:
+	// the middleware's snapshot queries are the expensive kind, and a
+	// value below the floor would keep one running almost continuously.
+	snapshotRefresh, err := resolveSnapshotAutoRefresh(*snapAutoRF)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pademelon: %v\n", err)
+		os.Exit(2)
+	}
+	if snapshotRefresh < 0 || (snapshotRefresh > 0 && snapshotRefresh < clocks.SnapshotAutoRefreshFloor) {
+		fmt.Fprintf(os.Stderr, "pademelon: -snapshot-auto-refresh must be 0s (disabled) or at least %s, got %s\n",
+			clocks.SnapshotAutoRefreshFloor, snapshotRefresh)
+		os.Exit(2)
+	}
+
 	if *showVersion {
 		fmt.Println("pademelon", version)
 		return
@@ -151,8 +166,9 @@ func main() {
 	}
 
 	// The middleware client owns its own connection: dial, login and
-	// keepalive live on the background loop below, and the web layer only
-	// ever reads its status. Requests never talk to the NAS directly.
+	// keepalive live on the background loop below. The web layer reads
+	// its status, and the snapshot service rides it for on-demand list
+	// fetches — the one place a request may trigger middleware work.
 	var truenasClient *truenas.Client
 	if truenasAddr != "" {
 		tn, err := truenas.New(truenas.Config{
@@ -176,6 +192,21 @@ func main() {
 	}
 
 	cache := model.NewCache()
+
+	// The snapshot service owns the on-demand middleware reads: a fetch
+	// starts when a panel opens, when the refresh button asks, or when
+	// the action layer verifies a snapshot id — never on a timer. One VM
+	// at a time, so the middleware's expensive per-dataset queries never
+	// stack.
+	var snapService *snapshots.Service
+	if truenasClient != nil {
+		snapService = snapshots.New(snapshots.Config{
+			Lister: truenasClient,
+			Waker:  truenasClient,
+			VMs:    func() []model.VM { return cache.Get().VMs },
+			Log:    log,
+		})
+	}
 
 	// Everything that wants an early poll asks this channel: the web
 	// layer's refresh button, finished action jobs, and agent lifecycle
@@ -216,8 +247,10 @@ func main() {
 		// zone rule as the libvirt verbs. nil (integration off) keeps
 		// snapshot jobs refused at submit time.
 		var tnForActions actions.MiddlewareClient
+		var tnGuard actions.SnapshotGuard
 		if truenasClient != nil {
 			tnForActions = truenasClient
+			tnGuard = snapService
 		}
 		store := actions.New(actions.Config{
 			Log:          log,
@@ -226,6 +259,7 @@ func main() {
 			Nudge:        nudge,
 			AgentTimeout: *agentTimeout,
 			Truenas:      tnForActions,
+			Guard:        tnGuard,
 		})
 		actionStore = store
 		sweepStore = store
@@ -245,21 +279,28 @@ func main() {
 		go sweepStore.SweepLoop(ctx)
 	}
 
-	// The typed-nil trap, third occurrence. The web and actions layers
-	// have their guards; this call site is the one that panicked in
-	// production. A nil *truenas.Client passed straight into the
-	// middlewareSource interface is not a nil interface. pollLoop's nil
-	// check would pass, and the gather would dereference a dead client.
-	// Build the interface only when a real client sits behind it.
-	var tnLister middlewareSource
-	if truenasClient != nil {
-		tnLister = truenasClient
+	go pollLoop(ctx, src, cache, *interval, nudge, log)
+
+	// Typed-nil trap, fourth occurrence: a nil *snapshots.Service inside
+	// the web interface would make the snapshot routes panic on use.
+	var snapProvider web.SnapshotProvider
+	if snapService != nil {
+		snapProvider = snapService
 	}
-	go pollLoop(ctx, src, cache, *interval, nudge, tnLister, log)
 
 	srv := &http.Server{
-		Addr:              *listen,
-		Handler:           web.New(web.Config{Cache: cache, Log: log, Theme: *theme, Token: token, Nudge: nudge, Actions: actionStore, Truenas: truenasClient}).Handler(),
+		Addr: *listen,
+		Handler: web.New(web.Config{
+			Cache:               cache,
+			Log:                 log,
+			Theme:               *theme,
+			Token:               token,
+			Nudge:               nudge,
+			Actions:             actionStore,
+			Truenas:             truenasClient,
+			Snaps:               snapProvider,
+			SnapshotAutoRefresh: snapshotRefresh,
+		}).Handler(),
 		ReadHeaderTimeout: clocks.HeaderReadTimeout,
 	}
 
@@ -280,14 +321,6 @@ func main() {
 	}
 }
 
-// middlewareSource is what the poll loop needs from the middleware
-// client: its status and the per-dataset snapshot list. *truenas.Client
-// satisfies it; a test fake can too.
-type middlewareSource interface {
-	Status() truenas.Status
-	Snapshots(ctx context.Context, dataset string) ([]truenas.Snapshot, error)
-}
-
 // pollLoop polls straight away, then on the interval, until ctx is done.
 // A nudge on the channel asks for an early poll. The refresh button,
 // finished action jobs and agent lifecycle events all send nudges.
@@ -296,21 +329,21 @@ type middlewareSource interface {
 // or an agent that starts and stops during a guest boot, therefore
 // cannot flood libvirt.
 //
+// The poll loop is purely libvirt: snapshot lists do not ride it. The
+// middleware's per-dataset queries are far too expensive to repeat on a
+// timer (a full round once stalled every poll to its budget), so they
+// happen on demand in internal/snapshots instead.
+//
 // A failed poll is not fatal: the cache keeps the last good data and marks
 // it stale, and the next tick tries to reconnect. A libvirtd restart or a
-// NAS reboot should never need this container restarted. The middleware
-// gather rides the same loop. Middleware trouble costs a stale snapshot
-// list, never the libvirt data.
-func pollLoop(ctx context.Context, src *libvirtsrc.Source, cache *model.Cache, interval time.Duration, nudge chan struct{}, tn middlewareSource, log *slog.Logger) {
+// NAS reboot should never need this container restarted.
+func pollLoop(ctx context.Context, src *libvirtsrc.Source, cache *model.Cache, interval time.Duration, nudge chan struct{}, log *slog.Logger) {
 	poll := func() {
 		snap, err := src.Poll()
 		if err != nil {
 			log.Error("poll failed", "err", err)
 			cache.SetError(err)
 			return
-		}
-		if tn != nil {
-			gatherTruenasSnapshots(ctx, tn, &snap, cache.Get(), log)
 		}
 		cache.Set(snap)
 	}
@@ -419,74 +452,6 @@ func resolveAllowActions(flagValue bool) (bool, error) {
 	return v, nil
 }
 
-// gatherTruenasSnapshots asks the middleware for each VM's disk-dataset
-// snapshots and pours them into the snapshot that the poll loop is about
-// to cache. File-backed disks have no zvol and are skipped. A gather
-// failure costs the freshness of the list, never the libvirt data. The
-// previous poll's lists are carried over, so a middleware hiccup reads
-// as "stale", not as "your snapshots vanished".
-func gatherTruenasSnapshots(ctx context.Context, tn middlewareSource, snap *model.Snapshot, prev model.Snapshot, log *slog.Logger) {
-	// A second guard behind the call-site check: a typed-nil client
-	// inside the interface (the crash from 2026-09-07) must read as
-	// "integration off", not as a SIGSEGV mid-poll.
-	if tn == nil || reflect.ValueOf(tn).Kind() == reflect.Ptr && reflect.ValueOf(tn).IsNil() {
-		return
-	}
-
-	gctx, cancel := context.WithTimeout(ctx, clocks.SnapshotGatherBudget)
-	defer cancel()
-
-	st := tn.Status()
-	g := &model.TruenasGather{Connected: st.Connected, Version: st.Version, At: time.Now()}
-
-	for i := range snap.VMs {
-		vm := &snap.VMs[i]
-		outOfBudget := false
-		for _, disk := range vm.Disks {
-			if gctx.Err() != nil {
-				outOfBudget = true
-				break
-			}
-			ds, ok := truenas.DatasetFromDiskSource(disk.Source)
-			if !ok {
-				continue // file-backed disk, ISO, or a source with no mapping
-			}
-			list, err := tn.Snapshots(gctx, ds)
-			if err != nil {
-				if g.Error == "" {
-					g.Error = err.Error()
-				}
-				continue
-			}
-			for _, s := range list {
-				vm.Snapshots = append(vm.Snapshots, model.ZfsSnapshot{
-					ID: s.ID, Dataset: s.Dataset, Name: s.Name,
-					Created: s.Created, Used: s.Used, Referenced: s.Referenced,
-				})
-			}
-		}
-		sort.Slice(vm.Snapshots, func(a, b int) bool {
-			return vm.Snapshots[a].Created > vm.Snapshots[b].Created
-		})
-		// Carry the previous list over when this round came up empty for
-		// a VM that had one — middleware down should look stale, not
-		// empty. A VM with genuinely no snapshots stays empty either way.
-		if len(vm.Snapshots) == 0 && (outOfBudget || g.Error != "") {
-			for _, pv := range prev.VMs {
-				if pv.Domain == vm.Domain && len(pv.Snapshots) > 0 {
-					vm.Snapshots = pv.Snapshots
-					break
-				}
-			}
-		}
-		if outOfBudget {
-			log.Warn("snapshot gather ran out of budget; the next poll finishes the job")
-			break
-		}
-	}
-	snap.Truenas = g
-}
-
 // resolveTruenasHost picks the middleware address: the flag, then
 // $TRUENAS_HOST. Empty means the integration is off — the only soft
 // outcome in the middleware config, because "off" is a legitimate choice
@@ -534,6 +499,22 @@ func resolveTruenasKey(flagValue string) (key, source string, err error) {
 		return "", "", fmt.Errorf("middleware API key is configured but empty; see documentation/truenas-service-account.md")
 	}
 	return key, source, nil
+}
+
+// resolveSnapshotAutoRefresh picks the open-panel snapshot refresh
+// interval: the flag, then $PADAMELON_SNAPSHOT_AUTO_REFRESH. Zero
+// (disabled) is a legitimate choice; a malformed value is an error, the
+// same strictness as every other flag+env pair.
+func resolveSnapshotAutoRefresh(flagValue time.Duration) (time.Duration, error) {
+	raw := strings.TrimSpace(os.Getenv("PADAMELON_SNAPSHOT_AUTO_REFRESH"))
+	if raw == "" {
+		return flagValue, nil
+	}
+	v, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("PADAMELON_SNAPSHOT_AUTO_REFRESH is %q, want a duration (e.g. 60s, 0s to disable)", raw)
+	}
+	return v, nil
 }
 
 func newLogger(level, format string) (*slog.Logger, error) {
