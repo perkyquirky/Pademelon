@@ -123,6 +123,14 @@ const (
 	// bound is generous. A job that exceeds it ends as timeout with
 	// instructions rather than leaving a half-rebooted VM.
 	RebootTimeout = 3 * time.Minute
+
+	// ShutdownRetryInterval is how often the wait-for-stopped loop
+	// re-sends the shutdown request. Some guests ignore the first one —
+	// an Alpine test guest needed a second command — and without the
+	// retry the job would sit out the whole wait bound before giving up.
+	// Must stay well above the 2s state-poll gap and well under
+	// RebootTimeout.
+	ShutdownRetryInterval = 20 * time.Second
 )
 
 // TrueNAS middleware bounds (internal/truenas). The client runs on its own

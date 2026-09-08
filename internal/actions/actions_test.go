@@ -808,3 +808,317 @@ func TestSnapshotGuardWithoutGuardConfigured(t *testing.T) {
 		t.Errorf("delete without a guard = %v, want ErrGuardUnavailable", err)
 	}
 }
+
+// findStep pulls one step out of a job's step list.
+func findStep(j Job, name string) (JobStep, bool) {
+	for _, st := range j.Steps {
+		if st.Name == name {
+			return st, true
+		}
+	}
+	return JobStep{}, false
+}
+
+func mustStep(t *testing.T, j Job, name, wantState, wantDetailPart string) {
+	t.Helper()
+	st, ok := findStep(j, name)
+	if !ok {
+		t.Fatalf("job has no %q step: %+v", name, j.Steps)
+	}
+	if st.State != wantState {
+		t.Errorf("step %q state = %q, want %q (detail %q)", name, st.State, wantState, st.Detail)
+	}
+	if wantDetailPart != "" && !strings.Contains(st.Detail, wantDetailPart) {
+		t.Errorf("step %q detail = %q, want it to contain %q", name, st.Detail, wantDetailPart)
+	}
+}
+
+// TestRestoreStagedSteps: the stepper's core promise — stop, then
+// libvirt's own confirmation that the guest is off, then the rollback,
+// then the start. The verify step must go done before the rollback runs.
+func TestRestoreStagedSteps(t *testing.T) {
+	doms := &fakeDomains{getInfo: []uint8{runningState, shutoffState}}
+	mw := &fakeMiddleware{}
+	s := newRestoreStore(doms, mw, "running")
+
+	submitted, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{
+		SnapshotID: testSnapID, Mode: ModeStaged, StartAfter: true, Ack: true,
+	})
+	if err != nil {
+		t.Fatalf("submit restore: %v", err)
+	}
+	// The checklist exists the moment the job is queued.
+	mustStep(t, *submitted, StepStop, StepPending, "")
+	mustStep(t, *submitted, StepStart, StepPending, "")
+
+	done := waitForJob(t, s, submitted.ID, StateOK)
+	mustStep(t, done, StepStop, StepDone, "")
+	mustStep(t, done, StepVerify, StepDone, "libvirt confirms the guest is off")
+	mustStep(t, done, StepRollback, StepDone, "rolled back")
+	mustStep(t, done, StepStart, StepDone, "guest started")
+	// The rollback must run after the guest was confirmed off.
+	if !strings.Contains(mw.rollbacks[0], "recursive=true") {
+		t.Errorf("rollbacks = %v", mw.rollbacks)
+	}
+}
+
+// TestRestoreStagedAlreadyStopped: a guest that is off at execution time
+// skips the stop phase and confirms off instantly — visible as
+// skipped + done, not hidden.
+func TestRestoreStagedAlreadyStopped(t *testing.T) {
+	doms := &fakeDomains{getInfo: []uint8{shutoffState}}
+	s := newRestoreStore(doms, &fakeMiddleware{}, "stopped")
+
+	job, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{
+		SnapshotID: testSnapID, Mode: ModeStaged, StartAfter: false,
+	})
+	if err != nil {
+		t.Fatalf("submit restore: %v", err)
+	}
+	done := waitForJob(t, s, job.ID, StateOK)
+	mustStep(t, done, StepStop, StepSkipped, "already stopped")
+	mustStep(t, done, StepVerify, StepDone, "already off")
+	mustStep(t, done, StepRollback, StepDone, "")
+	if _, has := findStep(done, StepStart); has {
+		t.Errorf("no start step was requested but the job has one: %+v", done.Steps)
+	}
+}
+
+// TestRestoreStagedGuestRefusesToStop: the verify phase runs out and the
+// job ends as timeout — the verify step carries the force-off hint, and
+// the rollback must never have run.
+func TestRestoreStagedGuestRefusesToStop(t *testing.T) {
+	doms := &fakeDomains{
+		agentErr: errors.New("guest agent command timed out: Guest agent disappeared while executing command"),
+		getInfo:  []uint8{runningState}, // repeats running forever
+	}
+	mw := &fakeMiddleware{}
+	s := newRestoreStoreGuarded(doms, mw, "running", guardWith("14_alpine_test", testSnapID))
+	s.cfg.RebootTimeout = 30 * time.Millisecond
+	s.cfg.WaitPoll = time.Millisecond
+	s.cfg.ShutdownRetry = time.Hour // one shutdown request, no re-sends
+
+	job, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{
+		SnapshotID: testSnapID, Mode: ModeStaged,
+	})
+	if err != nil {
+		t.Fatalf("submit restore: %v", err)
+	}
+	done := waitForJob(t, s, job.ID, StateTimeout)
+	mustStep(t, done, StepStop, StepDone, "")
+	mustStep(t, done, StepVerify, StepFailed, "force off")
+	mustStep(t, done, StepRollback, StepPending, "")
+	if len(mw.rollbacks) != 0 {
+		t.Errorf("rollback ran despite the guest never stopping: %v", mw.rollbacks)
+	}
+}
+
+// TestRestoreStagedRetriesShutdown: the guest ignores the first shutdown
+// request — the wait loop re-sends it, and the stop step's detail says so.
+// The visible answer to the Alpine guest that needs two commands.
+func TestRestoreStagedRetriesShutdown(t *testing.T) {
+	doms := &fakeDomains{
+		agentErr: errors.New("guest agent command timed out: Guest agent disappeared while executing command"),
+		getInfo:  []uint8{runningState, runningState, runningState, runningState, runningState, runningState, runningState, runningState, shutoffState},
+	}
+	s := newRestoreStore(doms, &fakeMiddleware{}, "running")
+	s.cfg.RebootTimeout = 2 * time.Second
+	s.cfg.WaitPoll = time.Millisecond
+	s.cfg.ShutdownRetry = 5 * time.Millisecond
+
+	job, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{
+		SnapshotID: testSnapID, Mode: ModeStaged,
+	})
+	if err != nil {
+		t.Fatalf("submit restore: %v", err)
+	}
+	done := waitForJob(t, s, job.ID, StateOK)
+	mustStep(t, done, StepStop, StepDone, "re-sent")
+	shutdowns := 0
+	for _, c := range doms.calls {
+		if strings.Contains(c, "guest-shutdown") || strings.Contains(c, "shutdownFlags") {
+			shutdowns++
+		}
+	}
+	if shutdowns < 2 {
+		t.Errorf("shutdown sent %d times, want at least 2 (the re-send): %v", shutdowns, doms.calls)
+	}
+}
+
+// TestRestoreDirectSingleStep: a direct restore has no shutdown to wait
+// for — one rollback pill, and it goes done.
+func TestRestoreDirectSingleStep(t *testing.T) {
+	s := newRestoreStore(&fakeDomains{}, &fakeMiddleware{}, "running")
+
+	job, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{
+		SnapshotID: testSnapID, Mode: ModeDirect, Ack: true,
+	})
+	if err != nil {
+		t.Fatalf("submit restore: %v", err)
+	}
+	if len(job.Steps) != 1 || job.Steps[0].Name != StepRollback {
+		t.Fatalf("direct restore steps = %+v, want only rollback", job.Steps)
+	}
+	done := waitForJob(t, s, job.ID, StateOK)
+	mustStep(t, done, StepRollback, StepDone, "")
+}
+
+// TestStagedRestoreBoundCoversTheWait: the outer job bound must outlive
+// the wait-for-stopped phase, or the job is marked timeout while its
+// steps keep advancing — the regression the stepper work exposed.
+func TestStagedRestoreBoundCoversTheWait(t *testing.T) {
+	doms := &fakeDomains{getInfo: []uint8{runningState, shutoffState}}
+	s := newRestoreStore(doms, &fakeMiddleware{}, "running")
+	s.cfg.Timeout = 10 * time.Millisecond // the old default that wrongly applied
+	s.cfg.RebootTimeout = 200 * time.Millisecond
+	s.cfg.WaitPoll = time.Millisecond
+
+	job, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{
+		SnapshotID: testSnapID, Mode: ModeStaged,
+	})
+	if err != nil {
+		t.Fatalf("submit restore: %v", err)
+	}
+	done := waitForJob(t, s, job.ID, StateOK)
+	if !strings.Contains(done.Detail, "rolled back") {
+		t.Errorf("detail = %q, want the successful restore story", done.Detail)
+	}
+}
+
+// TestCloneDeepCopiesSteps: mutating a returned job's steps must not
+// touch the registry's copy — the runner updates steps in place, and a
+// shared backing array would let those writes leak into clones mid-read.
+func TestCloneDeepCopiesSteps(t *testing.T) {
+	s := newRestoreStore(&fakeDomains{getInfo: []uint8{shutoffState}}, &fakeMiddleware{}, "stopped")
+	job, err := s.SubmitRestore(context.Background(), "14_alpine_test", RestoreOpts{
+		SnapshotID: testSnapID, Mode: ModeStaged,
+	})
+	if err != nil {
+		t.Fatalf("submit restore: %v", err)
+	}
+	done := waitForJob(t, s, job.ID, StateOK)
+
+	// Sabotage the returned copy.
+	for i := range done.Steps {
+		done.Steps[i].State = "sabotaged"
+		done.Steps[i] = JobStep{Name: done.Steps[i].Name, State: "sabotaged"}
+	}
+	fresh := s.List()
+	for _, j := range fresh {
+		if j.ID != job.ID {
+			continue
+		}
+		for _, st := range j.Steps {
+			if st.State == "sabotaged" {
+				t.Errorf("registry copy was mutated through the returned clone: %+v", j.Steps)
+			}
+		}
+	}
+}
+
+// TestSnapshotStepsFrozen: the freeze path reports quiesce → snapshot →
+// unquiesce, all done, with the freeze story in the quiesce detail.
+func TestSnapshotStepsFrozen(t *testing.T) {
+	doms := &fakeDomains{agentReply: `{"return":1}`}
+	mw := &fakeMiddleware{}
+	s, _ := newSnapshotStore(doms, mw, true)
+
+	job := submitSnapshot(t, s)
+	got := waitForJob(t, s, job.ID, StateOK)
+
+	mustStep(t, got, StepQuiesce, StepDone, "frozen")
+	mustStep(t, got, StepSnapshot, StepDone, "dataset")
+	mustStep(t, got, StepUnquiesce, StepDone, "thawed")
+}
+
+// TestSnapshotStepsSuspendFallback: the agent has no fsfreeze — the
+// quiesce step says so, and the suspend/resume pair still lands.
+func TestSnapshotStepsSuspendFallback(t *testing.T) {
+	s := New(Config{
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Snapshot: snapWith(snapshotTestVM(model.AgentDisconnected, "running")),
+		Conn:     &fakeConn{doms: &fakeDomains{}},
+		Nudge:    make(chan struct{}, 8),
+		Timeout:  2 * time.Second,
+		Truenas:  &fakeMiddleware{},
+	})
+	job := submitSnapshot(t, s)
+	got := waitForJob(t, s, job.ID, StateOK)
+
+	mustStep(t, got, StepQuiesce, StepDone, "paused for the shot")
+	mustStep(t, got, StepUnquiesce, StepDone, "resumed")
+}
+
+// TestSnapshotStepsPartialFailureKeepsThawing: a create fails after the
+// freeze — the snapshot step goes failed, but the unquiesce step still
+// lands done. A frozen guest is a hung guest, whatever the job's verdict.
+func TestSnapshotStepsPartialFailureKeepsThawing(t *testing.T) {
+	doms := &fakeDomains{agentReply: `{"return":1}`}
+	mw := &fakeMiddleware{failFrom: 1, err: errors.New("dataset busy")}
+	s, _ := newSnapshotStore(doms, mw, true)
+
+	job := submitSnapshot(t, s)
+	got := waitForJob(t, s, job.ID, StateFailed)
+
+	mustStep(t, got, StepQuiesce, StepDone, "frozen")
+	mustStep(t, got, StepSnapshot, StepFailed, "dataset busy")
+	mustStep(t, got, StepUnquiesce, StepDone, "thawed")
+}
+
+// TestSnapshotStepsAlreadyQuiesced: a paused guest skips the quiesce
+// phase visibly.
+func TestSnapshotStepsAlreadyQuiesced(t *testing.T) {
+	s := New(Config{
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Snapshot: snapWith(snapshotTestVM(model.AgentOK, "paused")),
+		Conn:     &fakeConn{doms: &fakeDomains{}},
+		Nudge:    make(chan struct{}, 8),
+		Timeout:  2 * time.Second,
+		Truenas:  &fakeMiddleware{},
+	})
+	job := submitSnapshot(t, s)
+	got := waitForJob(t, s, job.ID, StateOK)
+
+	mustStep(t, got, StepQuiesce, StepSkipped, "already quiesced")
+	mustStep(t, got, StepSnapshot, StepDone, "")
+	mustStep(t, got, StepUnquiesce, StepSkipped, "")
+}
+
+// TestRebootSteps: the reboot's pills mirror the restore's stop/verify
+// and add the start — the same visible confirmation the stepper gives
+// restore.
+func TestRebootSteps(t *testing.T) {
+	fds := &fakeDomains{
+		agentErr: errors.New("guest agent command timed out: Guest agent disappeared while executing command"),
+		getInfo:  []uint8{runningState, shutoffState},
+	}
+	s, _ := newTestStore(snapWith(runningVM(model.AgentOK)), &fakeConn{doms: fds}, time.Second)
+	s.cfg.RebootTimeout = time.Minute
+	s.cfg.WaitPoll = time.Millisecond
+
+	job, err := s.Submit("14_alpine_test", ActionReboot)
+	if err != nil {
+		t.Fatalf("Submit reboot: %v", err)
+	}
+	done := waitForJob(t, s, job.ID, StateOK)
+	mustStep(t, done, StepStop, StepDone, "")
+	mustStep(t, done, StepVerify, StepDone, "libvirt confirms the guest is off")
+	mustStep(t, done, StepStart, StepDone, "guest started")
+}
+
+// TestRebootRetriesShutdown: the reboot's wait loop re-sends the shutdown
+// the same way the staged restore's does.
+func TestRebootRetriesShutdown(t *testing.T) {
+	fds := &fakeDomains{
+		agentErr: errors.New("guest agent command timed out: Guest agent disappeared while executing command"),
+		getInfo:  []uint8{runningState, runningState, runningState, runningState, runningState, runningState, runningState, runningState, shutoffState},
+	}
+	s, _ := newTestStore(snapWith(runningVM(model.AgentOK)), &fakeConn{doms: fds}, time.Second)
+	s.cfg.RebootTimeout = 2 * time.Second
+	s.cfg.WaitPoll = time.Millisecond
+	s.cfg.ShutdownRetry = 5 * time.Millisecond
+
+	job, _ := s.Submit("14_alpine_test", ActionReboot)
+	done := waitForJob(t, s, job.ID, StateOK)
+	mustStep(t, done, StepStop, StepDone, "re-sent")
+}

@@ -110,6 +110,14 @@ type Job struct {
 	Requested time.Time `json:"requested"`
 	Detail    string    `json:"detail,omitempty"`
 
+	// Steps is the per-phase progress of a multi-phase job (staged
+	// restore, snapshot, reboot), pre-built at submit in execution
+	// order and updated in place as the job runs — the UI renders the
+	// list as pills that go solid phase by phase. Single-phase verbs
+	// (start, pause, delete, ...) carry no steps; their state and
+	// detail line tell the whole story.
+	Steps []JobStep `json:"steps,omitempty"`
+
 	// Snapshot, Mode, StartAfter and Ack ride restore jobs; Snapshot also
 	// rides delete jobs. They are set by the dedicated submit methods and
 	// are what the UI's job peek shows. Ack is the operator's signature —
@@ -119,6 +127,36 @@ type Job struct {
 	StartAfter bool   `json:"startAfter,omitempty"`
 	Ack        bool   `json:"ack,omitempty"`
 }
+
+// JobStep is one phase of a multi-phase job.
+type JobStep struct {
+	Name   string `json:"name"`
+	State  string `json:"state"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// Step states, in the order a healthy step moves through them. Skipped
+// marks a phase that did not apply (a guest already stopped; a guest
+// already quiesced); failed marks the phase that broke the job.
+const (
+	StepPending = "pending"
+	StepActive  = "active"
+	StepDone    = "done"
+	StepSkipped = "skipped"
+	StepFailed  = "failed"
+)
+
+// Step names. Stable strings: the page maps them to labels, so renaming
+// one is a UI-visible change on purpose.
+const (
+	StepStop      = "stop"
+	StepVerify    = "verify"
+	StepRollback  = "rollback"
+	StepStart     = "start"
+	StepQuiesce   = "quiesce"
+	StepSnapshot  = "snapshot"
+	StepUnquiesce = "unquiesce"
+)
 
 // Sentinel errors. The web layer maps them onto status codes; everything
 // else becomes a 500 with the detail logged.
@@ -200,6 +238,7 @@ type Config struct {
 	Timeout       time.Duration         // per-job wall clock bound; defaults to clocks.ActionTimeout
 	RebootTimeout time.Duration         // shutdown-then-start wait bound; defaults to clocks.RebootTimeout
 	WaitPoll      time.Duration         // reboot's guest-state poll interval; defaults to 2s (injectable for tests)
+	ShutdownRetry time.Duration         // how often the wait loop re-sends the shutdown; defaults to clocks.ShutdownRetryInterval
 
 	// SnapshotTimeout bounds one snapshot job (freeze + creates + thaw);
 	// defaults to clocks.SnapshotActionTimeout.
@@ -250,6 +289,9 @@ func New(cfg Config) *Store {
 	}
 	if cfg.WaitPoll <= 0 {
 		cfg.WaitPoll = 2 * time.Second
+	}
+	if cfg.ShutdownRetry <= 0 {
+		cfg.ShutdownRetry = clocks.ShutdownRetryInterval
 	}
 	// A nil *truenas.Client inside the interface is the typed-nil trap
 	// (the web layer hit it in production once); treat it as off.
@@ -310,12 +352,16 @@ func (s *Store) register(domain string, action Action, build func() *Job) (*Job,
 	for _, j := range s.jobs {
 		if j.Domain == domain && j.Action == action &&
 			(j.State == StatePending || j.State == StateRunning) {
-			inflight := *j
+			// clone, not a struct copy: the running job's steps are
+			// updated in place, and the returned copy must not alias
+			// them mid-encode.
+			inflight := clone(j)
 			s.mu.Unlock()
-			return &inflight, ErrInFlight
+			return inflight, ErrInFlight
 		}
 	}
 	job := build()
+	stepsFor(job)
 	s.jobs[job.ID] = job
 	// Clone under the lock: the runner goroutine below writes job fields
 	// under this same mutex, and a clone made after releasing it would
@@ -458,7 +504,10 @@ func (s *Store) List() []Job {
 	s.sweepLocked(s.cfg.Now())
 	out := make([]Job, 0, len(s.jobs))
 	for _, j := range s.jobs {
-		out = append(out, *j)
+		// clone, not a struct copy: the runner updates steps in place
+		// under the lock, and a shallow copy would alias that backing
+		// array into the caller's JSON encoding mid-write.
+		out = append(out, *clone(j))
 	}
 	for i := 1; i < len(out); i++ {
 		for k := i; k > 0 && out[k].Requested.Before(out[k-1].Requested); k-- {
@@ -534,13 +583,21 @@ func (s *Store) run(job *Job) {
 	// A reboot includes the wait-for-shutdown phase. Its outer bound gets
 	// a minute of slack over the reboot's own deadline, so the specific
 	// "guest did not power off" message fires before this catch-all
-	// timer. A snapshot job gets its own, longer bound: freeze,
-	// one create per dataset and the thaw are one sequence, and even a
-	// timed-out job keeps running it — the thaw still lands.
+	// timer. A staged restore includes that same wait — its bound must
+	// cover it too, or the job would be marked timeout mid-sequence
+	// while the steps kept advancing. A snapshot job gets its own, longer
+	// bound: freeze, one create per dataset and the thaw are one
+	// sequence, and even a timed-out job keeps running it — the thaw
+	// still lands. A direct restore is a quick rollback and keeps the
+	// default.
 	bound := s.cfg.Timeout
 	switch job.Action {
 	case ActionReboot:
 		bound = s.cfg.RebootTimeout + time.Minute
+	case ActionRestore:
+		if job.Mode == ModeStaged {
+			bound = s.cfg.RebootTimeout + time.Minute
+		}
 	case ActionSnapshot:
 		bound = s.cfg.SnapshotTimeout
 	}
@@ -550,6 +607,14 @@ func (s *Store) run(job *Job) {
 		s.mu.Lock()
 		job.State = StateTimeout
 		job.Detail = fmt.Sprintf("exceeded the %s action bound; the underlying call was abandoned and the next poll tells the truth", bound)
+		// Whichever phase the job was in when the bound fired is the
+		// phase that did not land — the pills must agree with the
+		// verdict.
+		for i := range job.Steps {
+			if job.Steps[i].State == StepActive {
+				job.Steps[i].State = StepFailed
+			}
+		}
 		s.mu.Unlock()
 		s.finish(job)
 		return
@@ -575,15 +640,77 @@ func (s *Store) run(job *Job) {
 
 // finish pokes the poller so the UI updates in a couple of seconds.
 func (s *Store) finish(job *Job) {
-	if s.cfg.Nudge != nil {
-		select {
-		case s.cfg.Nudge <- struct{}{}:
-		default:
-			// A nudge is already queued; the poll that covers it covers us.
-		}
-	}
+	s.nudgePoller()
 	s.cfg.Log.Info("action finished", "domain", job.Domain, "action", job.Action,
 		"state", job.State, "detail", job.Detail)
+}
+
+// nudgePoller pokes the poll loop for an early poll. Mid-job callers use
+// it when a phase changes something the poller will report (the guest
+// turning off, starting again), so the row catches up in one nudge
+// interval instead of a full poll.
+func (s *Store) nudgePoller() {
+	if s.cfg.Nudge == nil {
+		return
+	}
+	select {
+	case s.cfg.Nudge <- struct{}{}:
+	default:
+		// A nudge is already queued; the poll that covers it covers us.
+	}
+}
+
+// setStep moves one of the job's steps to a new state. An empty detail
+// leaves the step's existing wording alone, so a phase can go active →
+// done without erasing what it did. Called from the runner goroutine;
+// the write sits under the same mutex every reader uses.
+func (s *Store) setStep(job *Job, name, state, detail string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range job.Steps {
+		if job.Steps[i].Name == name {
+			job.Steps[i].State = state
+			if detail != "" {
+				job.Steps[i].Detail = detail
+			}
+			return
+		}
+	}
+	job.Steps = append(job.Steps, JobStep{Name: name, State: state, Detail: detail})
+}
+
+// stepsFor pre-builds a job's step list, in execution order. Phases that
+// may not apply stay pending — the runner marks them skipped when they
+// don't (a guest already stopped, a guest already quiesced), which the
+// UI shows as a greyed pill rather than hiding the phase.
+func stepsFor(job *Job) {
+	switch job.Action {
+	case ActionRestore:
+		if job.Mode == ModeStaged {
+			job.Steps = []JobStep{
+				{Name: StepStop, State: StepPending},
+				{Name: StepVerify, State: StepPending},
+				{Name: StepRollback, State: StepPending},
+			}
+			if job.StartAfter {
+				job.Steps = append(job.Steps, JobStep{Name: StepStart, State: StepPending})
+			}
+		} else {
+			job.Steps = []JobStep{{Name: StepRollback, State: StepPending}}
+		}
+	case ActionSnapshot:
+		job.Steps = []JobStep{
+			{Name: StepQuiesce, State: StepPending},
+			{Name: StepSnapshot, State: StepPending},
+			{Name: StepUnquiesce, State: StepPending},
+		}
+	case ActionReboot:
+		job.Steps = []JobStep{
+			{Name: StepStop, State: StepPending},
+			{Name: StepVerify, State: StepPending},
+			{Name: StepStart, State: StepPending},
+		}
+	}
 }
 
 // execute dispatches the verb for a job. It runs inside WithConnection, so
@@ -627,7 +754,8 @@ func (s *Store) execute(doms libvirtsrc.Domains, job *Job) (string, error) {
 // libvirt agrees it is off, roll back, optionally start again. Direct:
 // roll back in place — the submit-time ack is the operator's signature on
 // the risks, and the recursive flag is how newer snapshots get destroyed
-// on the way.
+// on the way. Each phase reports into the job's steps, so the UI can show
+// the guest being confirmed off before anything is rewound.
 func (s *Store) restore(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) (string, error) {
 	dataset, name, ok := strings.Cut(job.Snapshot, "@")
 	if !ok {
@@ -638,31 +766,60 @@ func (s *Store) restore(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) (
 	if job.Mode == ModeStaged {
 		state, _, _, _, _, err := doms.DomainGetInfo(dom)
 		if err != nil {
+			s.setStep(job, StepVerify, StepFailed, "could not read the guest state: "+err.Error())
 			return "", fmt.Errorf("restore: read guest state: %w", err)
 		}
 		if libvirt.DomainState(state) != libvirt.DomainShutoff {
+			s.setStep(job, StepStop, StepActive, "shutdown request sent")
 			if err := s.shutdown(doms, dom, job.Domain); err != nil {
+				s.setStep(job, StepStop, StepFailed, "shutdown request failed: "+err.Error())
 				return "", fmt.Errorf("restore: shutdown phase: %w", err)
 			}
-			if err := s.waitStopped(doms, dom, "force off, or roll back directly once it is stopped"); err != nil {
+			s.setStep(job, StepStop, StepDone, "")
+			s.setStep(job, StepVerify, StepActive, "waiting for libvirt to confirm the guest is off")
+			shutAt := s.cfg.Now()
+			resend := func(attempt int) {
+				note := fmt.Sprintf("shutdown re-sent (attempt %d) — some guests ignore the first", attempt)
+				if err := s.shutdown(doms, dom, job.Domain); err != nil {
+					note += "; re-send failed: " + err.Error()
+				}
+				s.setStep(job, StepStop, StepDone, note)
+			}
+			if err := s.waitStopped(doms, dom, "force off, or roll back directly once it is stopped", resend); err != nil {
+				s.setStep(job, StepVerify, StepFailed,
+					fmt.Sprintf("libvirt still reports the guest on after %s — force off, or roll back directly once it is stopped",
+						s.cfg.RebootTimeout))
 				return "", fmt.Errorf("restore: %w", err)
 			}
+			s.setStep(job, StepVerify, StepDone,
+				"libvirt confirms the guest is off ("+s.cfg.Now().Sub(shutAt).Round(time.Second).String()+")")
+			s.nudgePoller()
 			narration = "guest shut down, "
+		} else {
+			s.setStep(job, StepStop, StepSkipped, "guest was already stopped")
+			s.setStep(job, StepVerify, StepDone, "libvirt confirms the guest is already off")
 		}
 	} else if job.Mode != ModeDirect {
 		return "", fmt.Errorf("%w: mode %q", ErrBadRestore, job.Mode)
 	}
 
+	s.setStep(job, StepRollback, StepActive, "rewinding "+dataset)
 	if err := s.cfg.Truenas.RollbackSnapshot(context.Background(), dataset, name, job.Ack); err != nil {
+		s.setStep(job, StepRollback, StepFailed, err.Error())
 		return "", fmt.Errorf("restore: rollback failed, the guest is left as-is: %w", err)
 	}
+	s.setStep(job, StepRollback, StepDone, "rolled back to "+job.Snapshot)
 
 	var detail string
 	switch {
 	case job.Mode == ModeStaged && job.StartAfter:
+		s.setStep(job, StepStart, StepActive, "starting the guest again")
 		if err := doms.DomainCreate(dom); err != nil {
+			s.setStep(job, StepStart, StepFailed, err.Error())
 			return "", fmt.Errorf("restore: rolled back but start failed: %w", err)
 		}
+		s.setStep(job, StepStart, StepDone, "guest started")
+		s.nudgePoller()
 		detail = fmt.Sprintf("restored %q — %srolled back, started again", job.Snapshot, narration)
 	case job.Mode == ModeStaged:
 		detail = fmt.Sprintf("restored %q — %srolled back, guest left stopped", job.Snapshot, narration)
@@ -720,6 +877,7 @@ func (s *Store) snapshot(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) 
 	var freezeErr error
 	if vm.State == "running" {
 		if vm.Agent == model.AgentOK {
+			s.setStep(job, StepQuiesce, StepActive, "freezing the guest's filesystems")
 			_, freezeErr = rawAgentCall(doms, dom, int32(s.cfg.AgentTimeout/time.Second), `{"execute":"guest-fsfreeze-freeze"}`)
 			if freezeErr == nil {
 				froze = true
@@ -728,20 +886,35 @@ func (s *Store) snapshot(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) 
 				// An old agent without fsfreeze, or a transient hiccup —
 				// the suspend fallback quiesces just as well.
 				s.logDebug("fsfreeze failed, falling back to suspend", job.Domain, freezeErr)
+				s.setStep(job, StepQuiesce, StepActive, "fsfreeze failed, falling back to suspend")
 			}
+		} else {
+			s.setStep(job, StepQuiesce, StepActive, "suspending the guest (no working agent for fsfreeze)")
 		}
 		if !froze {
 			if err := doms.DomainSuspend(dom); err != nil {
+				s.setStep(job, StepQuiesce, StepFailed,
+					fmt.Sprintf("could not quiesce the guest (freeze: %v, suspend: %v)", freezeErr, err))
 				return "", fmt.Errorf("could not quiesce the guest (freeze: %v, suspend: %w)", freezeErr, err)
 			}
 			suspended = true
 		}
+		switch {
+		case froze:
+			s.setStep(job, StepQuiesce, StepDone, "guest filesystems frozen")
+		case suspended:
+			s.setStep(job, StepQuiesce, StepDone, "guest paused for the shot")
+		}
+	} else {
+		s.setStep(job, StepQuiesce, StepSkipped, "guest already quiesced ("+vm.State+")")
 	}
 
 	// --- snapshot phase -------------------------------------------------
 	// One create per dataset; a partial failure keeps going so the
 	// datasets that made it are reported rather than secretly dropped —
 	// no surprise deletions to "clean up".
+	s.setStep(job, StepSnapshot, StepActive,
+		fmt.Sprintf("creating %q on %d dataset(s)", name, len(datasets)))
 	var created, failed []string
 	for _, ds := range datasets {
 		_, err := s.cfg.Truenas.CreateSnapshot(context.Background(), ds, name)
@@ -751,19 +924,38 @@ func (s *Store) snapshot(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) 
 			created = append(created, ds)
 		}
 	}
+	if len(failed) > 0 {
+		s.setStep(job, StepSnapshot, StepFailed,
+			fmt.Sprintf("failed on %d of %d dataset(s): %s", len(failed), len(datasets), strings.Join(failed, "; ")))
+	} else {
+		s.setStep(job, StepSnapshot, StepDone,
+			fmt.Sprintf("created %q on %d dataset(s)", name, len(created)))
+	}
 
 	// --- un-quiesce phase — runs on every path below --------------------
 	var unquiesceErrs []string
 	if froze {
+		s.setStep(job, StepUnquiesce, StepActive, "thawing the guest's filesystems")
 		if err := s.thaw(doms, dom, job.Domain); err != nil {
 			unquiesceErrs = append(unquiesceErrs,
 				"WARNING: guest may still be frozen — retry the snapshot's thaw via the sweep, or thaw manually: "+err.Error())
+			s.setStep(job, StepUnquiesce, StepFailed,
+				"WARNING: guest may still be frozen — retry the snapshot's thaw via the sweep, or thaw manually: "+err.Error())
+		} else {
+			s.setStep(job, StepUnquiesce, StepDone, "guest filesystems thawed")
 		}
 	}
 	if suspended {
+		s.setStep(job, StepUnquiesce, StepActive, "resuming the guest")
 		if err := doms.DomainResume(dom); err != nil {
 			unquiesceErrs = append(unquiesceErrs, "WARNING: guest may still be paused: "+err.Error())
+			s.setStep(job, StepUnquiesce, StepFailed, "WARNING: guest may still be paused: "+err.Error())
+		} else {
+			s.setStep(job, StepUnquiesce, StepDone, "guest resumed")
 		}
+	}
+	if !froze && !suspended {
+		s.setStep(job, StepUnquiesce, StepSkipped, "nothing to un-quiesce")
 	}
 
 	// --- report -----------------------------------------------------------
@@ -970,9 +1162,14 @@ func (s *Store) sweepAgents(ctx context.Context, only map[string]bool) {
 // waitStopped polls libvirt until the guest is actually off, bounded by
 // RebootTimeout. Shared by the reboot and the staged restore — the same
 // patience, the same honest timeout, the same "left untouched" outcome.
-func (s *Store) waitStopped(doms libvirtsrc.Domains, dom libvirt.Domain, hint string) error {
+// Some guests ignore the first shutdown request (an Alpine test guest
+// needed a second), so resend fires every ShutdownRetryInterval while
+// waiting: attempt 1 is the original request, attempt 2 the first
+// re-send. A nil resend just waits.
+func (s *Store) waitStopped(doms libvirtsrc.Domains, dom libvirt.Domain, hint string, resend func(attempt int)) error {
 	deadline := s.cfg.Now().Add(s.cfg.RebootTimeout)
-	for {
+	lastSent := s.cfg.Now()
+	for attempt := 1; ; {
 		state, _, _, _, _, err := doms.DomainGetInfo(dom)
 		if err != nil {
 			return fmt.Errorf("waiting for shutdown: %w", err)
@@ -982,6 +1179,11 @@ func (s *Store) waitStopped(doms libvirtsrc.Domains, dom libvirt.Domain, hint st
 		}
 		if s.cfg.Now().After(deadline) {
 			return fmt.Errorf("%w within %s — %s", ErrGuestNotStopped, s.cfg.RebootTimeout, hint)
+		}
+		if resend != nil && s.cfg.Now().Sub(lastSent) >= s.cfg.ShutdownRetry {
+			attempt++
+			resend(attempt)
+			lastSent = s.cfg.Now()
 		}
 		time.Sleep(s.cfg.WaitPoll)
 	}
@@ -996,15 +1198,34 @@ func (s *Store) waitStopped(doms libvirtsrc.Domains, dom libvirt.Domain, hint st
 // with instructions and the VM is left untouched rather than
 // half-rebooted.
 func (s *Store) reboot(doms libvirtsrc.Domains, dom libvirt.Domain, job *Job) error {
+	s.setStep(job, StepStop, StepActive, "shutdown request sent")
 	if err := s.shutdown(doms, dom, job.Domain); err != nil {
+		s.setStep(job, StepStop, StepFailed, "shutdown request failed: "+err.Error())
 		return fmt.Errorf("shutdown phase: %w", err)
 	}
-	if err := s.waitStopped(doms, dom, "force off or start it manually"); err != nil {
+	s.setStep(job, StepStop, StepDone, "")
+	s.setStep(job, StepVerify, StepActive, "waiting for libvirt to confirm the guest is off")
+	resend := func(attempt int) {
+		note := fmt.Sprintf("shutdown re-sent (attempt %d) — some guests ignore the first", attempt)
+		if err := s.shutdown(doms, dom, job.Domain); err != nil {
+			note += "; re-send failed: " + err.Error()
+		}
+		s.setStep(job, StepStop, StepDone, note)
+	}
+	if err := s.waitStopped(doms, dom, "force off or start it manually", resend); err != nil {
+		s.setStep(job, StepVerify, StepFailed,
+			fmt.Sprintf("libvirt still reports the guest on after %s — force off or start it manually", s.cfg.RebootTimeout))
 		return err
 	}
+	s.setStep(job, StepVerify, StepDone, "libvirt confirms the guest is off")
+	s.nudgePoller()
+	s.setStep(job, StepStart, StepActive, "starting the guest again")
 	if err := doms.DomainCreate(dom); err != nil {
+		s.setStep(job, StepStart, StepFailed, err.Error())
 		return fmt.Errorf("guest stopped but start failed: %w", err)
 	}
+	s.setStep(job, StepStart, StepDone, "guest started")
+	s.nudgePoller()
 	return nil
 }
 
@@ -1118,7 +1339,13 @@ func stateNames(states map[string]bool) string {
 }
 
 // clone copies a job so callers cannot mutate the registry's copy.
+// Steps get a real copy: the runner updates them under the lock, and a
+// shared backing array would leak those writes into returned jobs.
 func clone(j *Job) *Job {
 	c := *j
+	if len(j.Steps) > 0 {
+		c.Steps = make([]JobStep, len(j.Steps))
+		copy(c.Steps, j.Steps)
+	}
 	return &c
 }

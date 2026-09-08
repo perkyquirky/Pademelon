@@ -671,6 +671,28 @@ tr.detail > td { padding: 8px 12px 14px 30px; }
 .snap-btn.danger { color: var(--warn-tx); border-color: var(--warn-tx); }
 #restore-dialog { max-width: 480px; }
 #restore-dialog .ctl { display: flex; gap: 8px; margin: 6px 0; text-align: left; align-items: baseline; }
+#job-dialog { max-width: 480px; }
+.stepper { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 6px; }
+.step {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 2px dashed var(--border-soft);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.step.pending { opacity: 0.65; }
+.step.active { border-style: solid; border-color: var(--accent); color: var(--text); animation: step-pulse 1.2s ease-in-out infinite; }
+.step.done { border-style: solid; background: var(--ok-bg); color: var(--ok-tx); border-color: var(--ok-bg); }
+.step.failed { border-style: solid; background: var(--bad-bg); color: var(--bad-tx); border-color: var(--bad-bg); }
+.step.skipped { opacity: 0.5; }
+@keyframes step-pulse { 50% { background: var(--accent-soft); } }
+.jobstrip { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.jobstrip .step { font-size: 11px; padding: 2px 9px; }
+.jobstrip-label { font-size: 12px; color: var(--muted); font-weight: 700; }
 #xml-dialog { max-width: 480px; }
 .xmlpre {
   max-height: 50vh;
@@ -924,6 +946,16 @@ button.btn-danger {
   <div class="auth-row">
     <button type="button" id="cf-cancel">cancel</button>
     <button type="button" id="cf-ok"></button>
+  </div>
+</dialog>
+
+<dialog id="job-dialog">
+  <h2 class="card-title"><span class="squig" id="jb-title"></span></h2>
+  <p class="auth-hint" id="jb-sub"></p>
+  <div class="stepper" id="jb-steps"></div>
+  <p class="auth-hint" id="jb-note"></p>
+  <div class="auth-actions">
+    <button type="button" id="jb-close">close</button>
   </div>
 </dialog>
 
@@ -1204,6 +1236,7 @@ function detailHtml(vm, open) {
         <button data-xml="${esc(vm.domain)}">raw xml</button>
         <span class="guestline"></span>
       </div>
+      <div class="jobstrip" hidden></div>
       <div class="grid2">${drivesHtml(vm)}${networkHtml(vm)}</div>
       <div class="mini snapshots" style="margin-top:12px"><h3>snapshots</h3><div class="snaplist"><div class="note">loading…</div></div></div>
     </div>
@@ -1349,6 +1382,7 @@ function buildRow(vm, open) {
       drivesEl: detail.querySelector(".mini.drives"),
       netEl: detail.querySelector(".mini.network"),
       guestEl: detail.querySelector(".guestline"),
+      jobEl: detail.querySelector(".jobstrip"),
       snapshotsEl: detail.querySelector(".snaplist")
     }
   };
@@ -1462,6 +1496,15 @@ async function tick() {
       }
     }
 
+    // Job progress: poll only while something is in flight (and only
+    // while logged in — the route is token-tier); the dialog and the
+    // panel strips repaint from the store every tick.
+    if (authOK && [...jobStore.values()].some(j => !TERMINAL_STATES.has(j.state))) {
+      await pollJobs();
+    }
+    paintJobStrips();
+    paintJobDialog();
+
     if (Date.now() >= statusHoldUntil && !selectionTouches(statusEl)) {
       if (snap.connected) {
         statusEl.className = "status";
@@ -1556,6 +1599,8 @@ async function checkCapabilities() {
     authOK = chk.ok;
     btnAuth.hidden = false;
     paintAuth();
+    // Pick up jobs that were already in flight when this page loaded.
+    if (capsActions && authOK) seedJobs();
   } catch (e) {
     // capabilities failing should never break the dashboard itself
   }
@@ -1737,9 +1782,11 @@ document.getElementById("rs-go").addEventListener("click", async () => {
     ack,
   });
   try {
-    await apiSubmit(`/api/vm/${encodeURIComponent(rsCtx.domain)}/snapshot/${encodeURIComponent(rsCtx.snap.id)}/restore`, { body });
-    toast("restore requested — the job reports each stage");
+    const job = await apiSubmit(`/api/vm/${encodeURIComponent(rsCtx.domain)}/snapshot/${encodeURIComponent(rsCtx.snap.id)}/restore`, { body });
+    // The dialog becomes the tracker: the steps come back from the poll
+    // below, phase by phase.
     restoreDialog.close();
+    openJobDialog(job);
   } catch (err) {
     toast(`restore: ${err.message}`);
   }
@@ -1759,6 +1806,156 @@ async function confirmDelete(domain, snap) {
   } catch (err) {
     toast(`delete: ${err.message}`);
   }
+}
+
+// --- job progress (the step tracker) ----------------------------------------
+
+// Multi-phase jobs (restore, snapshot, reboot) report a step list from the
+// server; this section turns it into the pill tracker — in the job dialog
+// and as a compact strip in the VM panel. Single-phase verbs (start,
+// pause, delete, ...) have no steps and keep the plain toast.
+
+// Pill labels per step name. The names come from the server; the wording
+// lives here and only here.
+const STEP_LABELS = {
+  stop: "shut down",
+  verify: "confirm off",
+  rollback: "roll back",
+  start: "start again",
+  quiesce: "quiesce guest",
+  snapshot: "take snapshot",
+  unquiesce: "un-quiesce",
+};
+const TERMINAL_STATES = new Set(["ok", "failed", "timeout"]);
+const STRIP_LINGER_MS = 30000; // how long a finished job stays on the panel strip
+
+const jobStore = new Map();    // id -> latest job seen
+const jobEndedAt = new Map();  // id -> when we first saw it terminal
+const jobToasted = new Set();  // ids whose terminal toast already fired
+const jobDialog = document.getElementById("job-dialog");
+let jbJobId = null;            // the job the dialog is bound to
+
+function stepPillHtml(st) {
+  const label = STEP_LABELS[st.name] || st.name;
+  const title = st.detail ? ` title="${esc(st.detail)}"` : "";
+  return `<span class="step ${esc(st.state)}"${title}>${esc(label)}</span>`;
+}
+
+function jobStateLine(job) {
+  if (job.state === "ok") return "done.";
+  if (job.state === "failed") return "failed — " + (job.detail || "see the steps");
+  if (job.state === "timeout") return "timed out — " + (job.detail || "see the steps");
+  return "running…";
+}
+
+function trackJob(job) {
+  if (!job || !job.id) return;
+  jobStore.set(job.id, job);
+}
+
+function openJobDialog(job) {
+  trackJob(job);
+  jbJobId = job.id;
+  document.getElementById("jb-title").textContent = `${job.action} → ${job.domain}`;
+  paintJobDialog();
+  jobDialog.showModal();
+}
+
+function paintJobDialog() {
+  if (!jbJobId || !jobDialog.open) return;
+  const job = jobStore.get(jbJobId);
+  if (!job) {
+    jobDialog.close();
+    jbJobId = null;
+    return;
+  }
+  const steps = job.steps || [];
+  document.getElementById("jb-steps").innerHTML = steps.map(stepPillHtml).join("");
+  const focus = steps.find(s => s.state === "failed") || steps.find(s => s.state === "active");
+  document.getElementById("jb-note").textContent = (focus && focus.detail) || jobStateLine(job);
+  document.getElementById("jb-sub").textContent = jobStateLine(job);
+}
+
+document.getElementById("jb-close").addEventListener("click", () => {
+  jbJobId = null;
+  jobDialog.close();
+});
+
+// The newest job for one VM that is still worth showing: anything in
+// flight, or a finished one inside the linger window.
+function stripJobFor(domain) {
+  let best = null;
+  for (const j of jobStore.values()) {
+    if (j.domain !== domain) continue;
+    if (TERMINAL_STATES.has(j.state)) {
+      const ended = jobEndedAt.get(j.id);
+      if (!ended || Date.now() - ended > STRIP_LINGER_MS) continue;
+    }
+    if (!best || (j.requested || "") > (best.requested || "")) best = j;
+  }
+  return best;
+}
+
+function paintJobStrips() {
+  for (const [domain, entry] of store) {
+    if (!entry.refs.jobEl) continue;
+    const job = stripJobFor(domain);
+    if (!job) {
+      if (!entry.refs.jobEl.hidden) entry.refs.jobEl.hidden = true;
+      continue;
+    }
+    entry.refs.jobEl.hidden = false;
+    entry.refs.jobEl.innerHTML =
+      `<span class="jobstrip-label">${esc(job.action)}</span>` +
+      (job.steps || []).map(stepPillHtml).join("");
+  }
+}
+
+// pollJobs refreshes tracked jobs. The tick calls it only while something
+// is in flight; terminal jobs linger locally for the strip, then drop.
+async function pollJobs() {
+  try {
+    const res = await fetch("/api/actions", { cache: "no-store" });
+    if (!res.ok) return;
+    const body = await res.json();
+    const seen = new Set();
+    for (const j of body.jobs || []) {
+      seen.add(j.id);
+      jobStore.set(j.id, j);
+      if (TERMINAL_STATES.has(j.state)) {
+        if (!jobEndedAt.has(j.id)) jobEndedAt.set(j.id, Date.now());
+        if (!jobToasted.has(j.id)) {
+          jobToasted.add(j.id);
+          const word = j.state === "ok" ? "done" : j.state;
+          toast(`${j.action}: ${word}${j.detail ? " — " + j.detail : ""}`);
+        }
+      }
+    }
+    for (const id of [...jobStore.keys()]) {
+      if (!seen.has(id)) {
+        // Swept by the server's retention; stop showing it.
+        jobStore.delete(id);
+        jobEndedAt.delete(id);
+        if (jbJobId === id) {
+          jbJobId = null;
+          jobDialog.close();
+        }
+      }
+    }
+  } catch (e) { /* an unreachable server is reported by the next tick */ }
+}
+
+// seedJobs picks up jobs that were already in flight when this page
+// loaded (a reload mid-restore keeps its tracker).
+async function seedJobs() {
+  try {
+    const res = await fetch("/api/actions", { cache: "no-store" });
+    if (!res.ok) return;
+    const body = await res.json();
+    for (const j of body.jobs || []) {
+      if (j.state === "pending" || j.state === "running") trackJob(j);
+    }
+  } catch (e) { /* the tick picks them up on the next poll anyway */ }
 }
 
 // --- power actions ----------------------------------------------------------
@@ -1834,6 +2031,16 @@ async function apiSubmit(path, opts) {
 function submitAction(domain, act) {
   apiSubmit(`/api/vm/${encodeURIComponent(domain)}/${act}`)
     .then(job => {
+      // Multi-phase verbs (snapshot, reboot) carry a step list: open the
+      // tracker instead of a fire-and-forget toast — the poll below
+      // keeps both the dialog and the panel strip honest, including the
+      // failure cases the old 3s peek guessed at.
+      if (job && job.steps && job.steps.length) {
+        if (act === "snapshot" || act === "reboot") openJobDialog(job);
+        else trackJob(job);
+        toast(`${act} requested — the tracker shows each step`);
+        return;
+      }
       toast(`${act} requested — poller will confirm`);
       // A job can still fail after its 202 (stale snapshot, dead agent).
       // Without this peek, a failed action looks like "nothing happened",

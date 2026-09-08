@@ -35,6 +35,7 @@ Windows and Linux (tested Windows Server 2022 & Ubuntu Server 24.04.4 LTS)
 - Manual refresh button
 - ZFS snapshot list per VM, fetched on demand from the TrueNAS middleware (when a panel opens or on refresh) with the optional `-snapshot-auto-refresh` timer for open panels — needs the middleware integration below
 - Snapshot now, restore and delete per snapshot — behind `-allow-actions` **and** the middleware integration
+- Step-by-step job tracker — staged restore, snapshot and reboot jobs show pill steps (shut down → confirm off → roll back → start again) in a progress dialog and in the VM panel; the guest is confirmed off by libvirt before a rollback runs, and guests that ignore the first shutdown request get it re-sent automatically
 - VM power actions — start, shutdown, reboot, force off, pause, resume, and a bulk "shut down all" — behind `-allow-actions` **and** a token, both required; see the auth section below
 - Colour themes — nine built in, pick one in the page header or set the server default with `-theme`
 - Optional token auth — see "Optional auth" below
